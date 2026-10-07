@@ -256,6 +256,31 @@ def day_signals(df: pd.DataFrame, fut):
     return strong, early
 
 
+def strong_details(d: pd.DataFrame, strong) -> list:
+    """For each strong signal: alert price and what Nifty did in the next 30 / 60 minutes.
+    Moves are index points in the signal's direction (best, worst, net)."""
+    out = []
+    for trig, sig in strong:
+        a = d.index.get_loc(trig) + HOLD_MIN          # candle where the live alert fires
+        if a >= len(d):
+            continue
+        sign = 1 if sig == CALL else -1
+        entry = d["Close"].iloc[a]
+        out.append(f"{'BUY CALL' if sign > 0 else 'BUY PUT'}: breakout {trig:%H:%M}, "
+                   f"alert {d.index[a]:%H:%M} at {entry:,.1f}")
+        for mins in (30, 60):
+            w = d.iloc[a + 1: a + 1 + mins]
+            if w.empty:
+                out.append(f"  next {mins} min: no data (market closed)")
+                continue
+            best = (w["High"].max() - entry) if sign > 0 else (entry - w["Low"].min())
+            worst = (entry - w["Low"].min()) if sign > 0 else (w["High"].max() - entry)
+            net = sign * (w["Close"].iloc[-1] - entry)
+            part = f" (only {len(w)} min left)" if len(w) < mins else ""
+            out.append(f"  next {mins} min: best {best:+.0f}, worst {-worst:+.0f}, net {net:+.0f} pts{part}")
+    return out
+
+
 def eod_summary(df: pd.DataFrame, fut) -> str:
     """End-of-day summary: how many CALL / PUT signals, and when."""
     d = df.between_time("09:15", "15:30")
@@ -274,6 +299,9 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
            f"Open {first.Open:,.1f} | High {d['High'].max():,.1f} | Low {d['Low'].min():,.1f} | "
            f"Close {last.Close:,.1f} ({chg:+,.1f} pts)", ""]
     out += lines("STRONG breakouts (live alerts; time = breakout candle):", strong)
+    details = strong_details(d, strong)
+    if details:
+        out += ["", "How the strong signals did (index points, in the signal's direction):"] + details
     out += [""] + lines("EARLY signals (weaker, not sent live):", early)
     out += ["", "Early signals flip often in range-bound markets. Not financial advice."]
     return "\n".join(out)
