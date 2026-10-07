@@ -39,6 +39,7 @@ MAX_EXTENSION_PCT = 0.25     # skip if price already ran this % past the level
 RANGE_WINDOW = 30            # candles used for the 'is it moving' check
 MIN_RANGE_PCT = 0.15         # skip if last 30-min range is below this %
 COOLDOWN_MIN = 15            # minutes between alerts
+OBSERVE_TELEGRAM_EVERY = 0   # silent price+volume update to Telegram every N minutes (0 = off)
 
 CALL, PUT, WAIT = "BUY CALL (CE)", "BUY PUT (PE)", "WAIT / NO TRADE"
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -46,14 +47,14 @@ TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str, silent: bool = False) -> None:
     if not (TG_TOKEN and TG_CHAT_ID):
         print("  (Telegram not configured, skipping alert)")
         return
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT_ID, "text": text},
+            json={"chat_id": TG_CHAT_ID, "text": text, "disable_notification": silent},
             timeout=10,
         )
         if not r.ok:
@@ -189,6 +190,60 @@ def analyze(df: pd.DataFrame, fut: pd.DataFrame = None):
     return signal, d * passes(checks), why, t_time
 
 
+def observation(df: pd.DataFrame, fut) -> str:
+    """One-line price + volume summary of the last closed 1-minute candle."""
+    k = df.iloc[-1]
+    move = k.Close - k.Open
+    line = (f"{df.index[-1]:%H:%M} Nifty O {k.Open:,.1f} H {k.High:,.1f} L {k.Low:,.1f} "
+            f"C {k.Close:,.1f} ({move:+.1f}, {'UP' if move > 0 else 'DOWN' if move < 0 else 'FLAT'})")
+    if fut is not None and len(fut) >= 22 and fut.index[-1] == df.index[-1]:
+        v = float(fut["Volume"].iloc[-1])
+        base = fut["Volume"].iloc[-21:-1].mean()
+        ratio = f"{v / base:.1f}x avg" if base > 0 else "n/a"
+        line += f"\nFutures volume {v:,.0f} ({ratio})"
+    else:
+        line += "\nFutures volume n/a"
+    return line
+
+
+def eod_summary(df: pd.DataFrame, fut, alerts) -> str:
+    """End-of-day price + volume summary from the day's 1-minute candles."""
+    d = df.between_time("09:15", "15:30")
+    first, last = d.iloc[0], d.iloc[-1]
+    hi, lo = d["High"].max(), d["Low"].min()
+    hi_t, lo_t = d["High"].idxmax(), d["Low"].idxmin()
+    chg, rng = last.Close - first.Open, hi - lo
+    pos = (last.Close - lo) / rng * 100 if rng > 0 else 50
+    where = "near the high" if pos >= 75 else "near the low" if pos <= 25 else "mid-range"
+    kind = ("Trend day " + ("UP" if chg > 0 else "DOWN")) if abs(chg) >= 0.6 * rng else "Range / choppy day"
+    out = [
+        f"END OF DAY - Nifty {d.index[-1]:%d %b %Y}",
+        f"Open {first.Open:,.1f} | High {hi:,.1f} ({hi_t:%H:%M}) | Low {lo:,.1f} ({lo_t:%H:%M}) | Close {last.Close:,.1f}",
+        f"Move {chg:+,.1f} pts ({chg / first.Open * 100:+.2f}%) | Range {rng:,.0f} pts ({rng / last.Close * 100:.2f}%)",
+        f"Closed {where}. {kind}.",
+    ]
+    f = fut.between_time("09:15", "15:30") if fut is not None and len(fut) else None
+    if f is not None and f["Volume"].sum() > 0:
+        tot = f["Volume"].sum()
+        pk = f["Volume"].idxmax()
+        out.append(f"Futures volume {tot:,.0f} total | peak minute {f['Volume'].max():,.0f} at {pk:%H:%M}")
+        for a, b, label in (("09:15", "10:29", "09:15-10:30"), ("10:30", "12:59", "10:30-13:00"),
+                            ("13:00", "15:30", "13:00-15:30")):
+            sd, sf = d.between_time(a, b), f.between_time(a, b)
+            if len(sd):
+                move = sd["Close"].iloc[-1] - sd["Open"].iloc[0]
+                out.append(f"{label}: {move:+,.0f} pts, {sf['Volume'].sum() / tot * 100:.0f}% of volume")
+        tp = (f["High"] + f["Low"] + f["Close"]) / 3
+        vwap = (tp * f["Volume"]).sum() / tot
+        side = "above" if f["Close"].iloc[-1] > vwap else "below"
+        out.append(f"Futures closed {side} day VWAP ({vwap:,.1f})")
+    else:
+        out.append("Futures volume: n/a")
+    out.append(f"Breakout alerts today: {len(alerts)}" + (" (" + ", ".join(alerts) + ")" if alerts else ""))
+    out.append("Not financial advice.")
+    return "\n".join(out)
+
+
 def market_open() -> bool:
     now = datetime.now(IST)
     return now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30)
@@ -206,12 +261,21 @@ def main():
                   f"Volume source: {fut_name or 'none (volume unverified)'}. "
                   f"Alerts are rare by design.")
 
-    last_candle, last_alert, last_trigger = None, None, None
+    last_candle, last_alert, last_trigger, obs_count = None, None, None, 0
+    alerts_sent = []
     while True:
         try:
             now = datetime.now(IST)
             if now.weekday() < 5 and (now.hour, now.minute) > (15, 30):
-                send_telegram("Market closed. Scanner stopped for the day.")
+                try:
+                    df = fetch_candles(INDEX_KEY)
+                    fut = fetch_candles(fut_key) if fut_key else None
+                    summary = eod_summary(df, fut, alerts_sent)
+                    print(summary)
+                    send_telegram(summary)
+                except Exception as e:
+                    print(f"End-of-day summary failed: {e}")
+                    send_telegram("Market closed. Scanner stopped for the day.")
                 print("Market closed. Stopping.")
                 break
             if not market_open():
@@ -228,13 +292,19 @@ def main():
                     last_candle = df.index[-1]
                     signal, score, why, trig_time = analyze(df, fut)
                     ts, price = df.index[-1].strftime("%H:%M"), df["Close"].iloc[-1]
+                    obs = observation(df, fut)
+                    print(obs.replace("\n", " | "))
                     print(f"[{ts}] Nifty {price:,.2f} | {signal} | checks passed {abs(score)}")
+                    obs_count += 1
+                    if OBSERVE_TELEGRAM_EVERY and obs_count % OBSERVE_TELEGRAM_EVERY == 0:
+                        send_telegram(obs, silent=True)  # silent: no buzz, breakout alerts still buzz
                     for w in why:
                         print(f"    {w}")
                     cooled = (last_alert is None or
                               (now - last_alert).total_seconds() >= COOLDOWN_MIN * 60)
                     if signal != WAIT and trig_time != last_trigger and cooled:
                         last_alert, last_trigger = now, trig_time
+                        alerts_sent.append(f"{signal.split()[1]} {ts}")
                         send_telegram(
                             f"STRONG BREAKOUT: {signal}\nNifty {price:,.2f} at {ts} IST\n"
                             f"Breakout candle: {trig_time.strftime('%H:%M')}\n"
