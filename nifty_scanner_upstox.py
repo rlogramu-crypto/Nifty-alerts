@@ -8,7 +8,7 @@ An alert is sent only when ALL of these pass:
   3. Volume: Nifty futures volume on that candle >= 1.5x its recent average
   4. Hold: the next 2 candles stay beyond the level (no fake-out)
   5. Not chasing: price is not already too far past the level
-  6. Trend: EMA9/EMA21 agree, futures on the right side of VWAP, RSI in a healthy zone
+  6. Trend: EMA9/EMA21 agree, futures on the right side of VWAP, RSI showing momentum (not already exhausted)
   7. Market is actually moving (30-min range above a minimum)
 
 Env vars: UPSTOX_ACCESS_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -166,7 +166,7 @@ def side_checks(df: pd.DataFrame, fut, d: int):
         vwap = (tp * fut["Volume"]).cumsum() / fut["Volume"].cumsum()
         checks.append((d * (fut["Close"].iloc[-1] - vwap.iloc[-1]) > 0, f"Futures {word} VWAP"))
     r = rsi(df["Close"]).iloc[-1]
-    lo, hi = (55, 78) if d > 0 else (22, 45)
+    lo, hi = (55, 88) if d > 0 else (12, 45)
     checks.append((lo <= r <= hi, f"RSI {r:.0f} (healthy zone {lo}-{hi})"))
 
     # 7. Market is moving
@@ -206,41 +206,76 @@ def observation(df: pd.DataFrame, fut) -> str:
     return line
 
 
-def eod_summary(df: pd.DataFrame, fut, alerts) -> str:
-    """End-of-day price + volume summary from the day's 1-minute candles."""
+def early_signal(df: pd.DataFrame, fut=None) -> str:
+    """Simple, weaker score-based signal (EMA, futures VWAP, opening range, RSI, engulfing).
+    Used only for the end-of-day count, never sent as a live alert."""
+    if len(df) < 25:
+        return WAIT
+    c = df["Close"]
+    ema9, ema21 = c.ewm(span=9, adjust=False).mean(), c.ewm(span=21, adjust=False).mean()
+    last, prev = df.iloc[-1], df.iloc[-2]
+    score = 1 if ema9.iloc[-1] > ema21.iloc[-1] else -1
+    if ema9.iloc[-1] > ema21.iloc[-1] and ema9.iloc[-2] <= ema21.iloc[-2]:
+        score += 1
+    elif ema9.iloc[-1] < ema21.iloc[-1] and ema9.iloc[-2] >= ema21.iloc[-2]:
+        score -= 1
+    if fut is not None and len(fut) >= 25 and fut["Volume"].sum() > 0:
+        tp = (fut["High"] + fut["Low"] + fut["Close"]) / 3
+        vwap = (tp * fut["Volume"]).cumsum() / fut["Volume"].cumsum()
+        score += 1 if fut["Close"].iloc[-1] > vwap.iloc[-1] else -1
+    orng = df.iloc[:OPENING_RANGE_MIN]
+    if len(df) > OPENING_RANGE_MIN:
+        if last.Close > orng["High"].max():
+            score += 1
+        elif last.Close < orng["Low"].min():
+            score -= 1
+    r = rsi(c).iloc[-1]
+    score += 1 if 55 < r < 70 else -1 if 30 < r < 45 else 0
+    pb, lb = prev.Close - prev.Open, last.Close - last.Open
+    if pb < 0 < lb and last.Close > prev.Open and last.Open < prev.Close:
+        score += 1
+    elif pb > 0 > lb and last.Close < prev.Open and last.Open > prev.Close:
+        score -= 1
+    return CALL if score >= 3 else PUT if score <= -3 else WAIT
+
+
+def day_signals(df: pd.DataFrame, fut):
+    """Replay the day candle by candle. Returns (strong, early) lists of (time, signal)."""
+    strong, early, seen, prev_e = [], [], set(), WAIT
+    for i in range(25, len(df)):
+        d = df.iloc[: i + 1]
+        f = fut[fut.index <= d.index[-1]] if fut is not None else None
+        sig, _, _, trig = analyze(d, f)
+        if sig != WAIT and trig not in seen:
+            seen.add(trig)
+            strong.append((trig, sig))
+        e = early_signal(d, f)
+        if e != WAIT and e != prev_e:
+            early.append((d.index[-1], e))
+        prev_e = e
+    return strong, early
+
+
+def eod_summary(df: pd.DataFrame, fut) -> str:
+    """End-of-day summary: how many CALL / PUT signals, and when."""
     d = df.between_time("09:15", "15:30")
+    strong, early = day_signals(d, fut.between_time("09:15", "15:30") if fut is not None else None)
+
+    def lines(title, items):
+        out = [title]
+        for sig, name in ((CALL, "BUY CALL"), (PUT, "BUY PUT")):
+            times = [f"{t:%H:%M}" for t, x in items if x == sig]
+            out.append(f"  {name}: {len(times)}" + (" at " + ", ".join(times) if times else ""))
+        return out
+
     first, last = d.iloc[0], d.iloc[-1]
-    hi, lo = d["High"].max(), d["Low"].min()
-    hi_t, lo_t = d["High"].idxmax(), d["Low"].idxmin()
-    chg, rng = last.Close - first.Open, hi - lo
-    pos = (last.Close - lo) / rng * 100 if rng > 0 else 50
-    where = "near the high" if pos >= 75 else "near the low" if pos <= 25 else "mid-range"
-    kind = ("Trend day " + ("UP" if chg > 0 else "DOWN")) if abs(chg) >= 0.6 * rng else "Range / choppy day"
-    out = [
-        f"END OF DAY - Nifty {d.index[-1]:%d %b %Y}",
-        f"Open {first.Open:,.1f} | High {hi:,.1f} ({hi_t:%H:%M}) | Low {lo:,.1f} ({lo_t:%H:%M}) | Close {last.Close:,.1f}",
-        f"Move {chg:+,.1f} pts ({chg / first.Open * 100:+.2f}%) | Range {rng:,.0f} pts ({rng / last.Close * 100:.2f}%)",
-        f"Closed {where}. {kind}.",
-    ]
-    f = fut.between_time("09:15", "15:30") if fut is not None and len(fut) else None
-    if f is not None and f["Volume"].sum() > 0:
-        tot = f["Volume"].sum()
-        pk = f["Volume"].idxmax()
-        out.append(f"Futures volume {tot:,.0f} total | peak minute {f['Volume'].max():,.0f} at {pk:%H:%M}")
-        for a, b, label in (("09:15", "10:29", "09:15-10:30"), ("10:30", "12:59", "10:30-13:00"),
-                            ("13:00", "15:30", "13:00-15:30")):
-            sd, sf = d.between_time(a, b), f.between_time(a, b)
-            if len(sd):
-                move = sd["Close"].iloc[-1] - sd["Open"].iloc[0]
-                out.append(f"{label}: {move:+,.0f} pts, {sf['Volume'].sum() / tot * 100:.0f}% of volume")
-        tp = (f["High"] + f["Low"] + f["Close"]) / 3
-        vwap = (tp * f["Volume"]).sum() / tot
-        side = "above" if f["Close"].iloc[-1] > vwap else "below"
-        out.append(f"Futures closed {side} day VWAP ({vwap:,.1f})")
-    else:
-        out.append("Futures volume: n/a")
-    out.append(f"Breakout alerts today: {len(alerts)}" + (" (" + ", ".join(alerts) + ")" if alerts else ""))
-    out.append("Not financial advice.")
+    chg = last.Close - first.Open
+    out = [f"SIGNALS TODAY - Nifty {d.index[-1]:%d %b %Y}",
+           f"Open {first.Open:,.1f} | High {d['High'].max():,.1f} | Low {d['Low'].min():,.1f} | "
+           f"Close {last.Close:,.1f} ({chg:+,.1f} pts)", ""]
+    out += lines("STRONG breakouts (live alerts; time = breakout candle):", strong)
+    out += [""] + lines("EARLY signals (weaker, not sent live):", early)
+    out += ["", "Early signals flip often in range-bound markets. Not financial advice."]
     return "\n".join(out)
 
 
@@ -270,7 +305,7 @@ def main():
                 try:
                     df = fetch_candles(INDEX_KEY)
                     fut = fetch_candles(fut_key) if fut_key else None
-                    summary = eod_summary(df, fut, alerts_sent)
+                    summary = eod_summary(df, fut)
                     print(summary)
                     send_telegram(summary)
                 except Exception as e:
