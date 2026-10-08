@@ -1,0 +1,41 @@
+name: Day data file
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date YYYY-MM-DD (blank = today)"
+        required: false
+        default: ""
+      from_time:
+        description: "Optional window start HH:MM, e.g. 12:00"
+        required: false
+        default: ""
+      to_time:
+        description: "Optional window end HH:MM, e.g. 12:50"
+        required: false
+        default: ""
+jobs:
+  dayfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python day_file.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          DATE: ${{ inputs.date }}
+          FROM_TIME: ${{ inputs.from_time }}
+          TO_TIME: ${{ inputs.to_time }}
+          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: day-data
+          path: nifty_*.csv
+          if-no-files-found: ignore
