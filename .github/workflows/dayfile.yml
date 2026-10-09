@@ -1,5 +1,7 @@
 name: Day data file
 on:
+  schedule:
+    - cron: "10 10 * * 1-5"   # 15:40 IST, Mon-Fri (blank date = today)
   workflow_dispatch:
     inputs:
       date:
