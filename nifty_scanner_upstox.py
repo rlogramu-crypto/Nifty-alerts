@@ -39,6 +39,7 @@ MAX_EXTENSION_PCT = 0.25     # skip if price already ran this % past the level
 RANGE_WINDOW = 30            # candles used for the 'is it moving' check
 MIN_RANGE_PCT = 0.15         # skip if last 30-min range is below this %
 COOLDOWN_MIN = 15            # minutes between alerts
+LATE_GRACE = 2               # still accept a breakout candle up to 2 candles older (covers skipped minutes)
 OBSERVE_TELEGRAM_EVERY = 0   # silent price+volume update to Telegram every N minutes (0 = off)
 
 CALL, PUT, WAIT = "BUY CALL (CE)", "BUY PUT (PE)", "WAIT / NO TRADE"
@@ -74,6 +75,9 @@ def fetch_candles(key: str) -> pd.DataFrame:
         raise SystemExit("Token expired or invalid. Generate a new Upstox access token.")
     r.raise_for_status()
     candles = r.json()["data"]["candles"]  # [ts, o, h, l, c, volume, oi], newest first
+    if not candles:  # no candles yet (before the first one, or no trading today)
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"],
+                            index=pd.DatetimeIndex([], tz=IST))
     df = pd.DataFrame(candles).iloc[:, :6]
     df.columns = ["Time", "Open", "High", "Low", "Close", "Volume"]
     df["Time"] = pd.to_datetime(df["Time"])
@@ -106,11 +110,11 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     return 100 - 100 / (1 + gain / loss.replace(0, 1e-9))
 
 
-def side_checks(df: pd.DataFrame, fut, d: int):
+def side_checks(df: pd.DataFrame, fut, d: int, lag: int = 0):
     """Checklist for one side. d=+1 breakout up (CALL), d=-1 breakdown (PUT).
     Each check is (True/False/None, text); None = informational only."""
     n = len(df)
-    t = n - 1 - HOLD_MIN                      # index of the breakout candle
+    t = n - 1 - HOLD_MIN - lag                # index of the breakout candle
     if t <= OPENING_RANGE_MIN:
         return None, [(False, "Waiting for enough candles after the opening range")]
     word = "above" if d > 0 else "below"
@@ -153,7 +157,7 @@ def side_checks(df: pd.DataFrame, fut, d: int):
     # 4. Hold beyond the level, 5. not chasing
     held = (all(d * (x - level) > 0 for x in df["Close"].iloc[t + 1:])
             and d * (last.Close - (trig.Open + trig.Close) / 2) > 0)
-    checks.append((held, f"Held {word} the level for {HOLD_MIN} candles"))
+    checks.append((held, f"Held {word} the level for {HOLD_MIN + lag} candles"))
     ext = d * (last.Close - level)
     checks.append((ext <= level * MAX_EXTENSION_PCT / 100, f"Not chasing ({ext:+.0f} pts past level now)"))
 
@@ -177,17 +181,23 @@ def side_checks(df: pd.DataFrame, fut, d: int):
 
 
 def analyze(df: pd.DataFrame, fut: pd.DataFrame = None):
-    """Returns (signal, score, reasons, breakout_candle_time)."""
+    """Returns (signal, score, reasons, breakout_candle_time).
+    Looks for a breakout candle HOLD_MIN..HOLD_MIN+LATE_GRACE candles ago, so a skipped
+    minute can't make us miss an alert."""
     if len(df) < 25:
         return WAIT, 0, ["Not enough candles yet (need ~25)."], None
-    sides = {1: side_checks(df, fut, 1), -1: side_checks(df, fut, -1)}
+    fmt = lambda checks: [("✓" if c is True else "✗" if c is False else "•") + " " + txt
+                          for c, txt in checks]
     passes = lambda cs: sum(1 for ok, _ in cs if ok is True)
+    sides = {1: side_checks(df, fut, 1), -1: side_checks(df, fut, -1)}   # lag 0, used for display
+    for lag in range(LATE_GRACE + 1):
+        for d in (1, -1):
+            t_time, checks = sides[d] if lag == 0 else side_checks(df, fut, d, lag)
+            if t_time is not None and all(c is not False for c, _ in checks):
+                return (CALL if d > 0 else PUT), d * passes(checks), fmt(checks), t_time
     d = 1 if passes(sides[1][1]) >= passes(sides[-1][1]) else -1
     t_time, checks = sides[d]
-    ok = all(c is not False for c, _ in checks)
-    why = [("✓" if c is True else "✗" if c is False else "•") + " " + txt for c, txt in checks]
-    signal = (CALL if d > 0 else PUT) if ok else WAIT
-    return signal, d * passes(checks), why, t_time
+    return WAIT, d * passes(checks), fmt(checks), t_time
 
 
 def observation(df: pd.DataFrame, fut) -> str:
@@ -196,11 +206,12 @@ def observation(df: pd.DataFrame, fut) -> str:
     move = k.Close - k.Open
     line = (f"{df.index[-1]:%H:%M} Nifty O {k.Open:,.1f} H {k.High:,.1f} L {k.Low:,.1f} "
             f"C {k.Close:,.1f} ({move:+.1f}, {'UP' if move > 0 else 'DOWN' if move < 0 else 'FLAT'})")
-    if fut is not None and len(fut) >= 22 and fut.index[-1] == df.index[-1]:
+    if fut is not None and len(fut) >= 22:
         v = float(fut["Volume"].iloc[-1])
         base = fut["Volume"].iloc[-21:-1].mean()
         ratio = f"{v / base:.1f}x avg" if base > 0 else "n/a"
-        line += f"\nFutures volume {v:,.0f} ({ratio})"
+        late = f" [futures candle {fut.index[-1]:%H:%M}]" if fut.index[-1] != df.index[-1] else ""
+        line += f"\nFutures volume {v:,.0f} ({ratio}){late}"
     else:
         line += "\nFutures volume n/a"
     return line
@@ -376,7 +387,7 @@ def main():
                         )
         except requests.RequestException as e:
             print(f"Network/API error: {e}")
-        time.sleep(REFRESH_SECONDS)
+        time.sleep(max(5, 68 - datetime.now(IST).second))  # wake at ~:08 of the next minute
 
 
 if __name__ == "__main__":
