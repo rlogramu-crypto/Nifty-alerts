@@ -3,6 +3,7 @@ Nifty 50 multi-signal scanner (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
 
 Alert types (each labelled with a confidence level):
+  INDICATION     LOW      early read on 8-24 candles (about 09:22), confirmed or not at 25 candles
   BREAKOUT       HIGH     strong, high-volume break of the day's range that holds 2 candles
   FAKE BREAKOUT  MEDIUM   high-volume break that fails and closes back inside the range
   PULLBACK       LOWER    trend continuation: bounce against the trend fails
@@ -43,6 +44,14 @@ COOLDOWN_MIN = 15            # minutes between alerts
 LATE_GRACE = 2               # still accept a breakout candle up to 2 candles older (covers skipped minutes)
 OBSERVE_TELEGRAM_EVERY = 0   # silent price+volume update to Telegram every N minutes (0 = off)
 
+# ---- Early INDICATION (opening candles, before the full 25-candle checks) ----
+IND_MIN_CANDLES = 8          # earliest candle count for an indication (about 09:22)
+FULL_CANDLES = 25            # at this many candles the full checks run and the indication is confirmed or not
+IND_EXT_WINDOW = 8           # the session low/high must be within the last 8 candles
+IND_FLIP_WINDOW = 6          # futures must have flipped across VWAP within the last 6 candles
+IND_INVALID_WINDOW = 6       # invalidation level = extreme of the last 6 candles
+IND_COOLDOWN_MIN = 3         # minutes between indications
+
 # ---- Extra signal types ----
 FAKE_WINDOW = 8              # a failed breakout is spotted up to 8 candles after the break
 FAKE_VOL_RATIO = 1.5         # the failed break must have had at least this volume
@@ -59,8 +68,8 @@ WATCH_TIMEOUT_MIN = 10       # send an UPDATE if nothing confirms within this ti
 WATCH_COOLDOWN_MIN = 15      # minutes between WAIT / observing notes
 
 # ---- Observation mode: what is sent live vs only counted in the end-of-day summary ----
-LIVE_KINDS = ("BREAKOUT",)   # add "FAKE BREAKOUT", "PULLBACK", "TREND REVERSE" to send them live too
-SEND_WAIT_NOTES = False      # True = send "WAIT - observing" notes and their UPDATE messages
+LIVE_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "TREND REVERSE")   # every type is sent live
+SEND_WAIT_NOTES = True       # True = send "WAIT - observing" notes and their UPDATE messages
 
 CALL, PUT, WAIT = "BUY CALL (CE)", "BUY PUT (PE)", "WAIT / NO TRADE"
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -281,7 +290,7 @@ def indicators(df: pd.DataFrame, fut) -> pd.DataFrame:
     ind["rsi"] = rsi(c)
     ind["vol_x"] = float("nan")
     ind["vwap_gap"] = float("nan")
-    if fut is not None and len(fut) >= 25 and fut["Volume"].sum() > 0:
+    if fut is not None and len(fut) >= 5 and fut["Volume"].sum() > 0:
         f = fut.reindex(df.index)
         base = f["Volume"].shift(1).rolling(20, min_periods=5).mean()
         ind["vol_x"] = f["Volume"] / base
@@ -369,6 +378,36 @@ def detect_reverse(df, ind):
     return None
 
 
+def detect_indication(df, ind):
+    """INDICATION: early reversal read on 8-24 candles. Session extreme just made, futures flipped
+    across VWAP, and a candle closing beyond the previous two. Low confidence by design."""
+    n = len(df)
+    if n < IND_MIN_CANDLES or n >= FULL_CANDLES:
+        return None
+    last, r = df.iloc[-1], ind.iloc[-1]
+    if pd.isna(r.vwap_gap):
+        return None  # needs futures data
+    for d in (1, -1):
+        ext_idx = int(df["Low"].values.argmin() if d > 0 else df["High"].values.argmax())
+        near_ext = (n - 1 - ext_idx) <= IND_EXT_WINDOW
+        gaps = ind["vwap_gap"].iloc[max(0, n - 1 - IND_FLIP_WINDOW):n - 1]
+        flip = d * r.vwap_gap > 0 and (d * gaps < 0).any()
+        body = d * (last.Close - last.Open) > 0
+        prior = df.iloc[n - 3:n - 1]
+        beyond = d * (last.Close - (prior["High"].max() if d > 0 else prior["Low"].min())) > 0
+        if near_ext and flip and body and beyond:
+            recent = df.iloc[-IND_INVALID_WINDOW:]
+            inval = float(recent["Low"].min() if d > 0 else recent["High"].max())
+            ext = df["Low"].min() if d > 0 else df["High"].max()
+            return {"signal": CALL if d > 0 else PUT, "key": CALL if d > 0 else PUT,
+                    "entry": float(last.Close), "inval": inval, "d": d, "candles": n,
+                    "why": [f"Session {'low' if d > 0 else 'high'} {ext:,.1f} made {n - 1 - ext_idx} candles ago",
+                            f"Futures flipped {'above' if d > 0 else 'below'} VWAP",
+                            f"Closed {last.Close:,.1f}, past the last 2 candles' {'high' if d > 0 else 'low'}",
+                            f"Based on only {n} candles. Confirmation comes at {FULL_CANDLES} candles."]}
+    return None
+
+
 def observe(df, ind):
     """A developing setup worth watching. Returns (key, text) or None. Not a trade signal."""
     n, last, r = len(df), df.iloc[-1], ind.iloc[-1]
@@ -389,7 +428,8 @@ def observe(df, ind):
     return None
 
 
-KINDS = (("BREAKOUT", "HIGH confidence"), ("FAKE BREAKOUT", "MEDIUM confidence"),
+KINDS = (("INDICATION", "LOW confidence (early, under 25 candles)"),
+         ("BREAKOUT", "HIGH confidence"), ("FAKE BREAKOUT", "MEDIUM confidence"),
          ("PULLBACK", "LOWER confidence (only 2 days tested)"),
          ("TREND REVERSE", "LOWER confidence (only 2 days tested)"))
 
@@ -398,6 +438,9 @@ def scan_candle(df, fut):
     """All signals on the latest candle. Returns (list of signal dicts, indicators)."""
     ind = indicators(df, fut)
     out = []
+    ind_sig = detect_indication(df, ind)
+    if ind_sig:
+        out.append({"kind": "INDICATION", **ind_sig})
     sig, _, why, trig = analyze(df, fut)
     if sig != WAIT:
         out.append({"kind": "BREAKOUT", "signal": sig, "key": trig, "why": why})
@@ -415,12 +458,14 @@ class State:
     def __init__(self):
         self.last_time, self.last_key = {}, {}
         self.watch, self.watch_since, self.last_watch = None, None, None
+        self.indication = None
 
     def allow(self, kind, key, now) -> bool:
         if key == self.last_key.get(kind):
             return False
         lt = self.last_time.get(kind)
-        if lt is not None and (now - lt).total_seconds() < COOLDOWN_MIN * 60:
+        cool = IND_COOLDOWN_MIN if kind == "INDICATION" else COOLDOWN_MIN
+        if lt is not None and (now - lt).total_seconds() < cool * 60:
             return False
         self.last_key[kind], self.last_time[kind] = key, now
         return True
@@ -430,15 +475,45 @@ def process_candle(df, fut, now, st: State) -> list:
     """Everything that happens on a new candle. Returns the Telegram messages to send."""
     msgs, conf = [], dict(KINDS)
     sigs, ind = scan_candle(df, fut)
-    price, ts = df["Close"].iloc[-1], f"{df.index[-1]:%H:%M}"
+    price, ts, n = df["Close"].iloc[-1], f"{df.index[-1]:%H:%M}", len(df)
+    # --- an early INDICATION is either invalidated, or confirmed / not confirmed at 25 candles
+    a = st.indication
+    if a:
+        side = "CALL" if a["d"] > 0 else "PUT"
+        if a["d"] * (price - a["inval"]) < 0:
+            msgs.append(f"INDICATION INVALIDATED ({ts})\nNifty {price:,.2f} closed "
+                        f"{'below' if a['d'] > 0 else 'above'} {a['inval']:,.1f}. "
+                        f"The early {side} idea from {a['time']} no longer holds. Wait.")
+            st.indication = None
+        elif n >= FULL_CANDLES:
+            ema_ok = a["d"] * (ind["ema9"].iloc[-1] - ind["ema21"].iloc[-1]) > 0
+            gap = ind["vwap_gap"].iloc[-1]
+            vwap_ok = pd.isna(gap) or a["d"] * gap > 0
+            held = a["d"] * (price - a["entry"]) >= 0
+            checks = [("EMA9 vs EMA21", ema_ok), ("Futures vs VWAP", vwap_ok), ("Price beyond indication entry", held)]
+            verdict = "CONFIRMED" if all(c for _, c in checks) else "NOT CONFIRMED"
+            msgs.append(f"{verdict}: early {side} indication from {a['time']} at {a['entry']:,.1f}\n"
+                        f"Nifty {price:,.2f} at {ts} IST after {n} candles\n"
+                        + "\n".join(f"{'✓' if c else '✗'} {name}" for name, c in checks)
+                        + ("\nNormal alerts take over from here." if verdict == "CONFIRMED"
+                           else "\nThe early idea is not supported. No trade on it.")
+                        + "\n\nNot financial advice.")
+            st.indication = None
     fired = False
     for s in sigs:
         if st.allow(s["kind"], s["key"], now) and s["kind"] in LIVE_KINDS:
             fired = True
             upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
+            extra = ""
+            if s["kind"] == "INDICATION":
+                side = "below" if s["d"] > 0 else "above"
+                replaced = (f"Replaces the earlier {'CALL' if st.indication['d'] > 0 else 'PUT'} indication.\n"
+                            if st.indication else "")
+                extra = f"{replaced}Invalidated if Nifty closes {side} {s['inval']:,.1f}.\n"
+                st.indication = {"d": s["d"], "entry": s["entry"], "inval": s["inval"], "time": ts}
             msgs.append(f"{s['kind']}: {s['signal']}\n{conf[s['kind']]}\n{upd}"
-                        f"Nifty {price:,.2f} at {ts} IST\n" + "\n".join(s["why"])
-                        + "\n\nNot financial advice. Use your own stop-loss.")
+                        f"Nifty {price:,.2f} at {ts} IST\n" + "\n".join(s["why"]) + "\n" + extra
+                        + "\nNot financial advice. Use your own stop-loss.")
     if fired:
         st.watch = None
         return msgs
@@ -460,7 +535,7 @@ def day_signals(df: pd.DataFrame, fut):
     """Replay the day candle by candle with the same rules as live.
     Returns a list of (time, kind, signal, candle_index)."""
     st, found = State(), []
-    for i in range(25, len(df)):
+    for i in range(IND_MIN_CANDLES - 1, len(df)):
         d = df.iloc[: i + 1]
         f = fut[fut.index <= d.index[-1]] if fut is not None else None
         sigs, _ = scan_candle(d, f)
@@ -479,9 +554,10 @@ def outcome_line(d: pd.DataFrame, t, kind, sig, i):
         if w.empty:
             parts.append(f"{mins}m n/a")
             continue
-        best = (w["High"].max() - entry) if sign > 0 else (entry - w["Low"].min())
-        worst = (entry - w["Low"].min()) if sign > 0 else (w["High"].max() - entry)
+        best = max(0.0, (w["High"].max() - entry) if sign > 0 else (entry - w["Low"].min()))
+        worst = max(0.0, (entry - w["Low"].min()) if sign > 0 else (w["High"].max() - entry))
         net = sign * (w["Close"].iloc[-1] - entry)
+        best, worst = max(0.0, best), max(0.0, worst)  # never show "--0" when price never went against us
         parts.append(f"{mins}m +{best:.0f}/-{worst:.0f}/{net:+.0f}")
         net60 = net
     return (f"{t:%H:%M} {'CALL' if sign > 0 else 'PUT'} {kind} @{entry:,.1f} | " + " | ".join(parts)), net60
@@ -527,9 +603,11 @@ def main():
     except Exception as e:
         print(f"Futures lookup failed ({e}). Running without volume.")
     print(f"Futures contract: {fut_name}")
-    send_telegram(f"Nifty scanner v4 started. Live alerts: {', '.join(LIVE_KINDS)}. "
-                  f"Other types are only counted in the end-of-day summary. "
-                  f"Volume source: {fut_name or 'none (volume unverified)'}.")
+    summary_only = [k for k, _ in KINDS if k not in LIVE_KINDS]
+    send_telegram(f"Nifty scanner v5 started. Live alerts: {', '.join(LIVE_KINDS)}"
+                  f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
+                  + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
+                  + f"Volume source: {fut_name or 'none (volume unverified)'}.")
 
     last_candle, obs_count, st = None, 0, State()
     while True:
@@ -564,10 +642,11 @@ def main():
                     obs_count += 1
                     if OBSERVE_TELEGRAM_EVERY and obs_count % OBSERVE_TELEGRAM_EVERY == 0:
                         send_telegram(obs, silent=True)
-                    if len(df) >= 25:
+                    if len(df) >= IND_MIN_CANDLES:
                         for m in process_candle(df, fut, now, st):
                             print(m.replace("\n", " | "))
                             send_telegram(m)
+                    if len(df) >= FULL_CANDLES:
                         _, _, why, _ = analyze(df, fut)
                         for w in why:
                             print(f"    {w}")
