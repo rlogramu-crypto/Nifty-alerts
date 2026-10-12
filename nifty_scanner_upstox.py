@@ -69,7 +69,7 @@ WATCH_COOLDOWN_MIN = 15      # minutes between WAIT / observing notes
 
 # ---- Observation mode: what is sent live vs only counted in the end-of-day summary ----
 LIVE_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "TREND REVERSE")   # every type is sent live
-SEND_WAIT_NOTES = True       # True = send "WAIT - observing" notes and their UPDATE messages
+SEND_WAIT_NOTES = False      # True = send "WAIT - observing" notes and their UPDATE messages
 
 CALL, PUT, WAIT = "BUY CALL (CE)", "BUY PUT (PE)", "WAIT / NO TRADE"
 IST = timezone(timedelta(hours=5, minutes=30))
