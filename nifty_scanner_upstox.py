@@ -595,6 +595,28 @@ def market_open() -> bool:
     return now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30)
 
 
+def sync_futures(df, fut, fut_key, retries=3, wait=5):
+    """The futures candle for the newest minute can arrive a few seconds after the index candle.
+    If it is missing, volume and VWAP are unknown and the detectors would let weak signals through
+    (this caused false alerts on 13 Oct). So: retry briefly, and if it is still missing, judge only
+    up to the last candle that BOTH feeds have."""
+    if fut is None or not len(fut) or not len(df):
+        return df, fut
+    for _ in range(retries):
+        if fut.index[-1] >= df.index[-1]:
+            break
+        time.sleep(wait)
+        try:
+            fut = fetch_candles(fut_key)
+        except requests.RequestException:
+            break
+    if len(fut) and fut.index[-1] < df.index[-1]:
+        lag = (df.index[-1] - fut.index[-1]).total_seconds() / 60
+        if lag <= 3:
+            df = df[df.index <= fut.index[-1]]
+    return df, fut
+
+
 def main():
     print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode).\n")
     fut_key, fut_name = None, None
@@ -635,6 +657,7 @@ def main():
                         fut = fetch_candles(fut_key)
                     except requests.RequestException as e:
                         print(f"  Futures fetch failed: {e}")
+                df, fut = sync_futures(df, fut, fut_key)
                 if len(df) and df.index[-1] != last_candle:  # evaluate each candle once
                     last_candle = df.index[-1]
                     obs = observation(df, fut)
