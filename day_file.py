@@ -10,7 +10,8 @@ CSV columns (one row per minute):
   open/high/low/close (Nifty), chg, fut_close, fut_vol, vol_x (vs prior 20 min avg),
   fut_vwap (running day VWAP), fut_vs_vwap, ema9/ema21/ema50, rsi14,
   vs_or_high / vs_or_low (points beyond the 15-min opening range),
-  early, strong (BREAKOUT), fake, pullback, reverse = CALL/PUT on every minute the condition was true
+  indication, strong (BREAKOUT), fake, pullback, reverse = CALL/PUT on every minute the condition was true.
+  weak_trend = a rough trend score (never sent as an alert; it is ON for most of a trend day)
   (raw, before the 15-minute cooldown, so you will see runs of the same signal)
 """
 import os
@@ -22,7 +23,7 @@ import pandas as pd
 import requests
 
 from nifty_scanner_upstox import (CALL, IST, INDEX_KEY, OPENING_RANGE_MIN, PUT, WAIT, TG_CHAT_ID,
-                                  TG_TOKEN, early_signal, fetch_candles, get_future_key, rsi,
+                                  TG_TOKEN, IND_MIN_CANDLES, early_signal, fetch_candles, get_future_key, rsi,
                                   scan_candle, send_telegram)
 
 
@@ -77,15 +78,16 @@ def build_table(df: pd.DataFrame, fut) -> pd.DataFrame:
     t["vs_or_high"] = df["Close"] - orng["High"].max()
     t["vs_or_low"] = df["Close"] - orng["Low"].min()
     t.loc[t.index[:OPENING_RANGE_MIN], ["vs_or_high", "vs_or_low"]] = float("nan")
-    names = {"BREAKOUT": "strong", "FAKE BREAKOUT": "fake", "PULLBACK": "pullback", "TREND REVERSE": "reverse"}
-    cols = {k: [] for k in ["early"] + list(names.values())}
+    names = {"INDICATION": "indication", "BREAKOUT": "strong", "FAKE BREAKOUT": "fake", "PULLBACK": "pullback",
+             "TREND REVERSE": "reverse"}
+    cols = {k: [] for k in ["weak_trend"] + list(names.values())}
     for i in range(len(df)):
         d = df.iloc[: i + 1]
         f = fut[fut.index <= d.index[-1]] if fut is not None and len(fut) else None
         e = early_signal(d, f)
-        cols["early"].append(e.split()[1] if e != WAIT else "")
+        cols["weak_trend"].append(e.split()[1] if e != WAIT else "")
         found = {v: "" for v in names.values()}
-        if i >= 25:
+        if i >= IND_MIN_CANDLES - 1:
             for sg in scan_candle(d, f)[0]:
                 found[names[sg["kind"]]] = sg["signal"].split()[1]
         for k, v in found.items():
@@ -101,7 +103,7 @@ def window_text(t: pd.DataFrame, a: str, b: str) -> str:
         return f"No rows between {a} and {b}."
     rows = ["time  close  chg  futvol  vol_x  vs_vwap  rsi  sig"]
     for ts, r in w.iterrows():
-        sig = ("S-" + r["strong"]) if r["strong"] else ("e-" + r["early"]) if r["early"] else ""
+        sig = ("S-" + r["strong"]) if r["strong"] else ("w-" + r["weak_trend"]) if r["weak_trend"] else ""
         rows.append(f"{ts:%H:%M} {r['close']:.1f} {r['chg']:+.1f} "
                     f"{r.get('fut_vol', float('nan')):.0f} {r.get('vol_x', float('nan')):.1f}x "
                     f"{r.get('fut_vs_vwap', float('nan')):+.0f} {r['rsi14']:.0f} {sig}")
