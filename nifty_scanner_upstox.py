@@ -8,6 +8,7 @@ Alert types (each labelled with a confidence level):
   FAKE BREAKOUT  MEDIUM   high-volume break that fails and closes back inside the range
   PULLBACK       LOWER    trend continuation: bounce against the trend fails
   TREND REVERSE  LOWER    fresh EMA cross + VWAP flip + break of recent structure
+  TREND          info     UP / DOWN status when the weak-trend score holds 10 min (context, not an entry)
   WAIT           info     "observing" note when a setup is developing, then an UPDATE message
 
 BREAKOUT needs ALL of: close beyond opening range and 30-min high/low, strong candle,
@@ -66,6 +67,10 @@ WATCH_PCT = 0.08             # "near the level" = within this % of a break level
 WATCH_VOL_RATIO = 3.0        # a candle with this much futures volume starts an observation
 WATCH_TIMEOUT_MIN = 10       # send an UPDATE if nothing confirms within this time
 WATCH_COOLDOWN_MIN = 15      # minutes between WAIT / observing notes
+
+# ---- TREND status message (context only, not an entry signal) ----
+SEND_TREND = True            # send "TREND UP / DOWN" when the weak-trend score holds for TREND_HOLD_MIN minutes
+TREND_HOLD_MIN = 10          # minutes in a row the weak-trend score must point the same way
 
 # ---- Observation mode: what is sent live vs only counted in the end-of-day summary ----
 LIVE_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "TREND REVERSE")   # every type is sent live
@@ -428,6 +433,42 @@ def observe(df, ind):
     return None
 
 
+def trend_direction_held(df, fut, hold=None):
+    """CALL / PUT if the weak-trend score has pointed the same way for `hold` candles in a row, else None."""
+    hold = hold or TREND_HOLD_MIN
+    n = len(df)
+    if n < FULL_CANDLES + hold - 1:
+        return None
+    first = None
+    for k in range(hold):
+        d = df.iloc[: n - k]
+        f = fut[fut.index <= d.index[-1]] if fut is not None else None
+        e = early_signal(d, f)
+        if e == WAIT:
+            return None
+        if first is None:
+            first = e
+        elif e != first:
+            return None
+    return first
+
+
+def trend_events(df, fut):
+    """Replay: every time the held trend direction changes. Returns [(time, 'UP' or 'DOWN')]."""
+    dirs = []
+    for i in range(len(df)):
+        d = df.iloc[: i + 1]
+        f = fut[fut.index <= d.index[-1]] if fut is not None else None
+        dirs.append(early_signal(d, f) if i + 1 >= FULL_CANDLES else WAIT)
+    events, reported = [], None
+    for i in range(TREND_HOLD_MIN - 1, len(dirs)):
+        w = dirs[i - TREND_HOLD_MIN + 1: i + 1]
+        if w[0] != WAIT and all(x == w[0] for x in w) and w[0] != reported:
+            reported = w[0]
+            events.append((df.index[i], "UP" if w[0] == CALL else "DOWN"))
+    return events
+
+
 KINDS = (("INDICATION", "LOW confidence (early, under 25 candles)"),
          ("BREAKOUT", "HIGH confidence"), ("FAKE BREAKOUT", "MEDIUM confidence"),
          ("PULLBACK", "LOWER confidence (only 2 days tested)"),
@@ -459,6 +500,7 @@ class State:
         self.last_time, self.last_key = {}, {}
         self.watch, self.watch_since, self.last_watch = None, None, None
         self.indication = None
+        self.trend_reported = None
 
     def allow(self, kind, key, now) -> bool:
         if key == self.last_key.get(kind):
@@ -476,6 +518,17 @@ def process_candle(df, fut, now, st: State) -> list:
     msgs, conf = [], dict(KINDS)
     sigs, ind = scan_candle(df, fut)
     price, ts, n = df["Close"].iloc[-1], f"{df.index[-1]:%H:%M}", len(df)
+    # --- TREND status: context only, sent when the held direction changes
+    if SEND_TREND:
+        td = trend_direction_held(df, fut)
+        if td and td != st.trend_reported:
+            st.trend_reported = td
+            up = td == CALL
+            msgs.append(f"TREND {'UP' if up else 'DOWN'} (held {TREND_HOLD_MIN} min)\n"
+                        f"Nifty {price:,.2f} at {ts} IST\n"
+                        f"The weak-trend score has pointed {'up' if up else 'down'} for {TREND_HOLD_MIN} minutes in a row.\n"
+                        f"Bias: favour {'CALL' if up else 'PUT'} setups and be careful with the opposite side.\n"
+                        f"Context only, not an entry. Choppy days flip it often.\n\nNot financial advice.")
     # --- an early INDICATION is either invalidated, or confirmed / not confirmed at 25 candles
     a = st.indication
     if a:
@@ -571,6 +624,10 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
     out = [f"SIGNALS TODAY - Nifty {d.index[-1]:%d %b %Y}",
            f"Open {first.Open:,.1f} | High {d['High'].max():,.1f} | Low {d['Low'].min():,.1f} | "
            f"Close {last.Close:,.1f} ({last.Close - first.Open:+,.1f} pts)", ""]
+    ev = trend_events(d, fut.between_time("09:15", "15:30") if fut is not None else None)
+    out.append("TREND (weak-trend score held %d min): " % TREND_HOLD_MIN
+               + (", ".join(f"{x} {t:%H:%M}" for t, x in ev) if ev else "none"))
+    out.append("")
     for kind, conf in KINDS:
         row = []
         for sig, name in ((CALL, "CALL"), (PUT, "PUT")):
