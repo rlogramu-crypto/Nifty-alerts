@@ -59,6 +59,7 @@ FAKE_VOL_RATIO = 1.5         # the failed break must have had at least this volu
 FAKE_MARGIN_PCT = 0.05       # price must close back inside the level by this % (~11 pts)
 PULL_BOUNCE_WINDOW = 6       # pullback: price must have bounced against the trend in the last 6 candles
 PULL_NO_ENTRY_AFTER = (14, 45)
+PULL_MIN_RANGE_PCT = 0.20     # pullback needs the last 30 minutes to have moved at least this % (0 = off)
 REV_CROSS_WINDOW = 10        # reversal: EMA9/21 cross must be this fresh
 REV_VWAP_WINDOW = 15         # reversal: price was on the other side of VWAP within this window
 REV_STRUCT_WINDOW = 15       # reversal: must break the last 15 candles' high/low
@@ -101,12 +102,16 @@ def send_telegram(text: str, silent: bool = False) -> None:
 def fetch_candles(key: str) -> pd.DataFrame:
     token = os.environ.get("UPSTOX_ACCESS_TOKEN")
     if not token:
-        raise SystemExit("Set the UPSTOX_ACCESS_TOKEN environment variable first.")
+        print("Set the UPSTOX_ACCESS_TOKEN environment variable first.")
+        raise SystemExit(3)
     url = f"https://api.upstox.com/v3/historical-candle/intraday/{quote(key, safe='')}/minutes/1"
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     r = requests.get(url, headers=headers, timeout=10)
     if r.status_code == 401:
-        raise SystemExit("Token expired or invalid. Generate a new Upstox access token.")
+        print("Token expired or invalid. Generate a new Upstox access token.")
+        send_telegram("Upstox token expired or invalid, so the scanner stopped. "
+                      "Update the token and it will restart by itself.")
+        raise SystemExit(3)
     r.raise_for_status()
     candles = r.json()["data"]["candles"]  # [ts, o, h, l, c, volume, oi], newest first
     if not candles:  # no candles yet (before the first one, or no trading today)
@@ -343,6 +348,9 @@ def detect_pullback(df, ind):
     n, last, r = len(df), df.iloc[-1], ind.iloc[-1]
     if n < 30 or (df.index[-1].hour, df.index[-1].minute) >= PULL_NO_ENTRY_AFTER:
         return None
+    win = df.iloc[-RANGE_WINDOW:]
+    if (win["High"].max() - win["Low"].min()) / last.Close * 100 < PULL_MIN_RANGE_PCT:
+        return None  # market is not moving enough; pullbacks in a flat range mostly lose
     w, wi = df.iloc[-1 - PULL_BOUNCE_WINDOW:-1], ind.iloc[-1 - PULL_BOUNCE_WINDOW:-1]
     for d in (-1, 1):
         stacked = d * (r.ema9 - r.ema21) > 0 and d * (r.ema21 - r.ema50) > 0
