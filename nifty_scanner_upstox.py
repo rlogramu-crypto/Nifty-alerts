@@ -73,9 +73,20 @@ WATCH_COOLDOWN_MIN = 15      # minutes between WAIT / observing notes
 SEND_TREND = True            # send "TREND UP / DOWN" when the weak-trend score holds for TREND_HOLD_MIN minutes
 TREND_HOLD_MIN = 10          # minutes in a row the weak-trend score must point the same way
 
+# ---- GitHub relay: a GitHub job is stopped after 6 hours, so the scanner hands over to a fresh run ----
+MAX_RUN_MIN = float(os.environ.get("SCAN_MAX_MINUTES", "0") or 0)   # 0 = never hand over (server use)
+
 # ---- Observation mode: what is sent live vs only counted in the end-of-day summary ----
 LIVE_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "TREND REVERSE")   # every type is sent live
 SEND_WAIT_NOTES = False      # True = send "WAIT - observing" notes and their UPDATE messages
+
+# ---- Alignment filter: only send signals that agree with price vs the day's open ----
+ALIGN_FILTER = True          # 8-day test: agreeing signals +1,205 pts, disagreeing -330 pts
+ALIGN_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK")   # TREND REVERSE is exempt (it is against the old direction by design)
+
+# ---- Opening read (09:30) and OPENING BREAK (observed in the end-of-day summary, not sent live) ----
+SEND_OPENING_READ = True
+OPENING_BREAK_UNTIL = (10, 0)   # first close beyond the first-15-minute range, before this time
 
 CALL, PUT, WAIT = "BUY CALL (CE)", "BUY PUT (PE)", "WAIT / NO TRADE"
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -480,7 +491,88 @@ def trend_events(df, fut):
 KINDS = (("INDICATION", "LOW confidence (early, under 25 candles)"),
          ("BREAKOUT", "HIGH confidence"), ("FAKE BREAKOUT", "MEDIUM confidence"),
          ("PULLBACK", "LOWER confidence (only 2 days tested)"),
-         ("TREND REVERSE", "LOWER confidence (only 2 days tested)"))
+         ("TREND REVERSE", "LOWER confidence (only 2 days tested)"),
+         ("OPENING BREAK", "OBSERVE only (stop at the range middle)"))
+
+
+def aligned_ok(df, kind, signal) -> bool:
+    """Alignment filter: a signal must agree with price vs the day's open at that moment."""
+    if not ALIGN_FILTER or kind not in ALIGN_KINDS:
+        return True
+    d = 1 if signal == CALL else -1
+    return d * (df["Close"].iloc[-1] - df["Open"].iloc[0]) > 0
+
+
+def detect_opening_break(df):
+    """OPENING BREAK: the first close beyond the 09:15-09:29 range (09:30 to OPENING_BREAK_UNTIL)."""
+    n = len(df)
+    if n <= OPENING_RANGE_MIN:
+        return None
+    t = df.index[-1]
+    if (t.hour, t.minute) >= OPENING_BREAK_UNTIL:
+        return None
+    hi, lo = df["High"].iloc[:OPENING_RANGE_MIN].max(), df["Low"].iloc[:OPENING_RANGE_MIN].min()
+    closes = df["Close"].iloc[OPENING_RANGE_MIN:]
+    first = next((k for k, c in enumerate(closes) if c > hi or c < lo), None)
+    if first is None or first != len(closes) - 1:
+        return None  # not the first close beyond the range, or this candle is not it
+    c = float(closes.iloc[-1])
+    up = c > hi
+    return {"signal": CALL if up else PUT, "key": f"{t:%Y-%m-%d}", "entry": c, "stop": float((hi + lo) / 2),
+            "why": [f"First close {'above' if up else 'below'} the opening range {lo:,.1f} to {hi:,.1f}",
+                    f"Stop idea: the range middle {(hi + lo) / 2:,.1f}. Exit idea: 15:15"]}
+
+
+def opening_break_outcome(d, t, sig, i):
+    """Result of an opening break held to 15:15, with a stop at the range middle."""
+    sign = 1 if sig == CALL else -1
+    entry = d["Close"].iloc[i]
+    hi, lo = d["High"].iloc[:OPENING_RANGE_MIN].max(), d["Low"].iloc[:OPENING_RANGE_MIN].min()
+    stop, res, how = (hi + lo) / 2, None, "15:15"
+    for j in range(i + 1, len(d)):
+        ts = d.index[j]
+        if (ts.hour, ts.minute) >= (15, 15):
+            res = sign * (d["Close"].iloc[j] - entry)
+            break
+        if (sign > 0 and d["Low"].iloc[j] <= stop) or (sign < 0 and d["High"].iloc[j] >= stop):
+            res, how = sign * (stop - entry), f"stopped {ts:%H:%M}"
+            break
+    if res is None:
+        res, how = sign * (d["Close"].iloc[-1] - entry), "close"
+    return (f"{t:%H:%M} {'CALL' if sign > 0 else 'PUT'} OPENING BREAK @{entry:,.1f} | stop {stop:,.0f} | "
+            f"result {res:+.0f} ({how})")
+
+
+def opening_read_message(df, prev_close=None) -> str:
+    o, c = df["Open"].iloc[0], df["Close"].iloc[OPENING_RANGE_MIN - 1]
+    hi, lo = df["High"].iloc[:OPENING_RANGE_MIN].max(), df["Low"].iloc[:OPENING_RANGE_MIN].min()
+    mv = c - o
+    bias = "UP" if mv >= 15 else "DOWN" if mv <= -15 else "FLAT (under 15 pts)"
+    lines = ["OPENING READ (first 15 minutes)"]
+    if prev_close:
+        lines.append(f"Gap: {o - prev_close:+,.0f} pts (open {o:,.1f} vs yesterday's close {prev_close:,.1f})")
+    lines += [f"First 15 min: {mv:+,.0f} pts ({o:,.1f} to {c:,.1f})",
+              f"Range: {lo:,.1f} to {hi:,.1f}",
+              f"Bias: {bias}",
+              f"Break levels: a close above {hi:,.1f} = UP break, below {lo:,.1f} = DOWN break.",
+              "Context only. The first-15-minute direction matched the day on 7 of 8 days so far "
+              "(the miss was a V-reversal).",
+              "", "Not financial advice."]
+    return "\n".join(lines)
+
+
+def fetch_prev_close():
+    """Yesterday's Nifty close from the daily candles (None if it cannot be fetched)."""
+    token = os.environ.get("UPSTOX_ACCESS_TOKEN")
+    today = datetime.now(IST).date()
+    url = (f"https://api.upstox.com/v3/historical-candle/{quote(INDEX_KEY, safe='')}/days/1/"
+           f"{(today - timedelta(days=1)).isoformat()}/{(today - timedelta(days=10)).isoformat()}")
+    r = requests.get(url, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, timeout=10)
+    r.raise_for_status()
+    candles = r.json()["data"]["candles"]   # [ts, o, h, l, c, ...]
+    if not candles:
+        return None
+    return float(max(candles, key=lambda c: c[0])[4])
 
 
 def scan_candle(df, fut):
@@ -493,6 +585,9 @@ def scan_candle(df, fut):
     sig, _, why, trig = analyze(df, fut)
     if sig != WAIT:
         out.append({"kind": "BREAKOUT", "signal": sig, "key": trig, "why": why})
+    ob = detect_opening_break(df)
+    if ob:
+        out.append({"kind": "OPENING BREAK", **ob})
     for kind, fn in (("FAKE BREAKOUT", detect_fake), ("PULLBACK", detect_pullback),
                      ("TREND REVERSE", detect_reverse)):
         r = fn(df, ind)
@@ -509,6 +604,8 @@ class State:
         self.watch, self.watch_since, self.last_watch = None, None, None
         self.indication = None
         self.trend_reported = None
+        self.prev_close = None
+        self.opening_read_done = False
 
     def allow(self, kind, key, now) -> bool:
         if key == self.last_key.get(kind):
@@ -526,6 +623,10 @@ def process_candle(df, fut, now, st: State) -> list:
     msgs, conf = [], dict(KINDS)
     sigs, ind = scan_candle(df, fut)
     price, ts, n = df["Close"].iloc[-1], f"{df.index[-1]:%H:%M}", len(df)
+    # --- OPENING READ: once, as soon as the first 15 minutes are complete
+    if SEND_OPENING_READ and not st.opening_read_done and n >= OPENING_RANGE_MIN:
+        st.opening_read_done = True
+        msgs.append(opening_read_message(df, st.prev_close))
     # --- TREND status: context only, sent when the held direction changes
     if SEND_TREND:
         td = trend_direction_held(df, fut)
@@ -562,6 +663,8 @@ def process_candle(df, fut, now, st: State) -> list:
             st.indication = None
     fired = False
     for s in sigs:
+        if not aligned_ok(df, s["kind"], s["signal"]):
+            continue  # against price vs the day's open: skipped (the summary lists it)
         if st.allow(s["kind"], s["key"], now) and s["kind"] in LIVE_KINDS:
             fired = True
             upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
@@ -592,15 +695,20 @@ def process_candle(df, fut, now, st: State) -> list:
     return msgs
 
 
-def day_signals(df: pd.DataFrame, fut):
+def day_signals(df: pd.DataFrame, fut, skipped=None):
     """Replay the day candle by candle with the same rules as live.
-    Returns a list of (time, kind, signal, candle_index)."""
-    st, found = State(), []
+    Returns a list of (time, kind, signal, candle_index). If `skipped` is a list, signals removed by the
+    alignment filter are appended to it (same tuple format)."""
+    st, st_skip, found = State(), State(), []
     for i in range(IND_MIN_CANDLES - 1, len(df)):
         d = df.iloc[: i + 1]
         f = fut[fut.index <= d.index[-1]] if fut is not None else None
         sigs, _ = scan_candle(d, f)
         for s in sigs:
+            if not aligned_ok(d, s["kind"], s["signal"]):
+                if skipped is not None and st_skip.allow(s["kind"], s["key"], d.index[-1]):
+                    skipped.append((d.index[-1], s["kind"], s["signal"], i))
+                continue
             if st.allow(s["kind"], s["key"], d.index[-1]):
                 found.append((d.index[-1], s["kind"], s["signal"], i))
     return found
@@ -627,7 +735,8 @@ def outcome_line(d: pd.DataFrame, t, kind, sig, i):
 def eod_summary(df: pd.DataFrame, fut) -> str:
     """End-of-day summary: signals by type with times, and how each one did."""
     d = df.between_time("09:15", "15:30")
-    found = day_signals(d, fut.between_time("09:15", "15:30") if fut is not None else None)
+    skipped = []
+    found = day_signals(d, fut.between_time("09:15", "15:30") if fut is not None else None, skipped)
     first, last = d.iloc[0], d.iloc[-1]
     out = [f"SIGNALS TODAY - Nifty {d.index[-1]:%d %b %Y}",
            f"Open {first.Open:,.1f} | High {d['High'].max():,.1f} | Low {d['Low'].min():,.1f} | "
@@ -642,10 +751,16 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
             times = [f"{t:%H:%M}" for t, k, s, _ in found if k == kind and s == sig]
             row.append(f"{name} {len(times)}" + (" at " + ", ".join(times) if times else ""))
         out.append(f"{kind} ({conf.split()[0]}): " + " | ".join(row))
+    if skipped:
+        out.append("Skipped (against price vs the day's open): "
+                   + ", ".join(f"{'CALL' if sg == CALL else 'PUT'} {k.title()} {t:%H:%M}" for t, k, sg, _ in skipped[:8]))
     if found:
         out += ["", "How each did, points in the signal's direction (30m / 60m: best/worst/net):"]
         total, nets = 0.0, 0
         for t, kind, sig, i in found[:30]:
+            if kind == "OPENING BREAK":
+                out.append(opening_break_outcome(d, t, sig, i))   # held to 15:15, so not added to the 60m sum
+                continue
             line, net60 = outcome_line(d, t, kind, sig, i)
             out.append(line)
             if net60 is not None:
@@ -691,12 +806,24 @@ def main():
         print(f"Futures lookup failed ({e}). Running without volume.")
     print(f"Futures contract: {fut_name}")
     summary_only = [k for k, _ in KINDS if k not in LIVE_KINDS]
-    send_telegram(f"Nifty scanner v5 started. Live alerts: {', '.join(LIVE_KINDS)}"
-                  f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
-                  + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
-                  + f"Volume source: {fut_name or 'none (volume unverified)'}.")
+    relay_run = os.environ.get("RELAY", "").lower() == "yes"
+    if relay_run:
+        send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
+    else:
+        send_telegram(f"Nifty scanner v6 started. Live alerts: {', '.join(LIVE_KINDS)}"
+                      f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
+                      + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
+                      + ("Alignment filter ON. " if ALIGN_FILTER else "")
+                      + f"Volume source: {fut_name or 'none (volume unverified)'}.")
 
     last_candle, obs_count, st = None, 0, State()
+    st.opening_read_done = relay_run          # a hand-over run must not repeat the 09:30 read
+    try:
+        st.prev_close = fetch_prev_close()
+    except Exception as e:
+        print(f"Previous close not available ({e}); the opening read will skip the gap.")
+    st.trend_reported = os.environ.get("RELAY_TREND") or None   # so the handover does not repeat the TREND message
+    started = time.time()
     while True:
         try:
             now = datetime.now(IST)
@@ -711,6 +838,13 @@ def main():
                     print(f"End-of-day summary failed: {e}")
                     send_telegram("Market closed. Scanner stopped for the day.")
                 print("Market closed. Stopping.")
+                break
+            if MAX_RUN_MIN and (time.time() - started) / 60 >= MAX_RUN_MIN and market_open():
+                with open("relay_needed", "w") as fh:        # the workflow starts the next run when it sees this file
+                    fh.write(st.trend_reported or "")
+                send_telegram("Handing over to a fresh GitHub run now (GitHub stops a job after 6 hours). "
+                              "Alerts continue in about a minute.")
+                print("Relay hand-over requested. Stopping this run.")
                 break
             if not market_open():
                 print("Waiting for market open (9:15 IST, Mon-Fri)...")
