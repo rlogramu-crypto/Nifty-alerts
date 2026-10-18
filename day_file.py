@@ -79,7 +79,7 @@ def build_table(df: pd.DataFrame, fut) -> pd.DataFrame:
     t["vs_or_low"] = df["Close"] - orng["Low"].min()
     t.loc[t.index[:OPENING_RANGE_MIN], ["vs_or_high", "vs_or_low"]] = float("nan")
     names = {"INDICATION": "indication", "BREAKOUT": "strong", "FAKE BREAKOUT": "fake", "PULLBACK": "pullback",
-             "TREND REVERSE": "reverse"}
+             "TREND REVERSE": "reverse", "OPENING BREAK": "opening_break"}
     cols = {k: [] for k in ["weak_trend"] + list(names.values())}
     for i in range(len(df)):
         d = df.iloc[: i + 1]
