@@ -1,21 +1,45 @@
 name: Nifty alerts
 on:
   schedule:
-    - cron: "35 3 * * 1-5"
+    - cron: "5 3 * * 1-5"      # 08:35 IST, Mon-Fri (GitHub may start it late)
   workflow_dispatch:
+    inputs:
+      relay:
+        description: "Set by the scanner when it hands over to a fresh run"
+        required: false
+        default: "no"
+      trend:
+        description: "Last TREND status (set by the hand-over)"
+        required: false
+        default: ""
+concurrency:
+  group: nifty-scanner          # never two scanners at once (no double alerts)
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: write                # lets the run start its successor
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 360        # GitHub's maximum
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python nifty_scanner_upstox.py
+      - name: Run scanner
+        run: python nifty_scanner_upstox.py
         env:
           PYTHONUNBUFFERED: "1"
-          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_MAX_MINUTES: "335"
+          RELAY: ${{ inputs.relay }}
+          RELAY_TREND: ${{ inputs.trend }}
+          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TG_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      - name: Hand over to a fresh run
+        if: hashFiles('relay_needed') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run scanner.yml --repo "$GITHUB_REPOSITORY" -f relay=yes -f trend="$(cat relay_needed)"
