@@ -35,9 +35,9 @@ jobs:
           SCAN_MAX_MINUTES: "335"
           RELAY: ${{ inputs.relay }}
           RELAY_TREND: ${{ inputs.trend }}
-          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TG_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN || secrets.UPSTOX_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
       - name: Hand over to a fresh run
         if: hashFiles('relay_needed') != ''
         env:
