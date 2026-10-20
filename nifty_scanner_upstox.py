@@ -850,6 +850,12 @@ def main():
                 print("Waiting for market open (9:15 IST, Mon-Fri)...")
             else:
                 df = fetch_candles(INDEX_KEY)
+                if not len(df) and (now.hour, now.minute) >= (9, 35):
+                    # 20 minutes after the open and still no candles: a market holiday or no data
+                    send_telegram("No Nifty candles today, so the market looks closed (holiday?). "
+                                  "Scanner stopping for the day.")
+                    print("No candles after 09:35 on a weekday. Stopping (holiday?).")
+                    break
                 fut = None
                 if fut_key:
                     try:
