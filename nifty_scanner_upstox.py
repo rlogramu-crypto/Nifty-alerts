@@ -81,7 +81,7 @@ LIVE_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "TREND REVE
 SEND_WAIT_NOTES = False      # True = send "WAIT - observing" notes and their UPDATE messages
 
 # ---- Alignment filter: only send signals that agree with price vs the day's open ----
-ALIGN_FILTER = True          # 8-day test: agreeing signals +1,205 pts, disagreeing -330 pts
+ALIGN_MODE = "tag"            # "tag" = send but mark "against the open"; "block" = skip them; "off" = ignore
 ALIGN_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK")   # TREND REVERSE is exempt (it is against the old direction by design)
 
 # ---- Opening read (09:30) and OPENING BREAK (observed in the end-of-day summary, not sent live) ----
@@ -495,12 +495,17 @@ KINDS = (("INDICATION", "LOW confidence (early, under 25 candles)"),
          ("OPENING BREAK", "OBSERVE only (stop at the range middle)"))
 
 
-def aligned_ok(df, kind, signal) -> bool:
-    """Alignment filter: a signal must agree with price vs the day's open at that moment."""
-    if not ALIGN_FILTER or kind not in ALIGN_KINDS:
+def is_aligned(df, kind, signal) -> bool:
+    """True if the signal agrees with price vs the day's open at this moment (exempt kinds always agree)."""
+    if kind not in ALIGN_KINDS:
         return True
     d = 1 if signal == CALL else -1
     return d * (df["Close"].iloc[-1] - df["Open"].iloc[0]) > 0
+
+
+def aligned_ok(df, kind, signal) -> bool:
+    """Should this signal be sent? Only 'block' mode ever says no; 'tag' mode sends and marks it."""
+    return ALIGN_MODE != "block" or is_aligned(df, kind, signal)
 
 
 def detect_opening_break(df):
@@ -675,7 +680,9 @@ def process_candle(df, fut, now, st: State) -> list:
                             if st.indication else "")
                 extra = f"{replaced}Invalidated if Nifty closes {side} {s['inval']:,.1f}.\n"
                 st.indication = {"d": s["d"], "entry": s["entry"], "inval": s["inval"], "time": ts}
-            msgs.append(f"{s['kind']}: {s['signal']}\n{conf[s['kind']]}\n{upd}"
+            note = ("NOTE: against price vs the day's open (lower odds so far)\n"
+                    if ALIGN_MODE == "tag" and not is_aligned(df, s["kind"], s["signal"]) else "")
+            msgs.append(f"{s['kind']}: {s['signal']}\n{conf[s['kind']]}\n{upd}{note}"
                         f"Nifty {price:,.2f} at {ts} IST\n" + "\n".join(s["why"]) + "\n" + extra
                         + "\nNot financial advice. Use your own stop-loss.")
     if fired:
@@ -757,15 +764,24 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
     if found:
         out += ["", "How each did, points in the signal's direction (30m / 60m: best/worst/net):"]
         total, nets = 0.0, 0
+        against_sum = against_n = with_sum = with_n = 0
         for t, kind, sig, i in found[:30]:
             if kind == "OPENING BREAK":
                 out.append(opening_break_outcome(d, t, sig, i))   # held to 15:15, so not added to the 60m sum
                 continue
             line, net60 = outcome_line(d, t, kind, sig, i)
-            out.append(line)
+            tagged = ALIGN_MODE != "off" and not is_aligned(d.iloc[: i + 1], kind, sig)
+            out.append(line + ("  [against open]" if tagged else ""))
             if net60 is not None:
                 total, nets = total + net60, nets + 1
+                if kind in ALIGN_KINDS:
+                    if tagged:
+                        against_sum, against_n = against_sum + net60, against_n + 1
+                    else:
+                        with_sum, with_n = with_sum + net60, with_n + 1
         out.append(f"Sum of 60m nets: {total:+.0f} pts over {nets} signals")
+        if ALIGN_MODE != "off" and (against_n or with_n):
+            out.append(f"In line with the open: {with_n} signals {with_sum:+.0f} | against the open: {against_n} signals {against_sum:+.0f}")
     out += ["", "Not financial advice."]
     return "\n".join(out)
 
@@ -813,7 +829,7 @@ def main():
         send_telegram(f"Nifty scanner v6 started. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
-                      + ("Alignment filter ON. " if ALIGN_FILTER else "")
+                      + (f"Against-the-open signals are {'tagged' if ALIGN_MODE == 'tag' else 'blocked'}. " if ALIGN_MODE != "off" else "")
                       + f"Volume source: {fut_name or 'none (volume unverified)'}.")
 
     last_candle, obs_count, st = None, 0, State()
