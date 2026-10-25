@@ -667,24 +667,35 @@ def process_candle(df, fut, now, st: State) -> list:
                         + "\n\nNot financial advice.")
             st.indication = None
     fired = False
-    for s in sigs:
-        if not aligned_ok(df, s["kind"], s["signal"]):
-            continue  # against price vs the day's open: skipped (the summary lists it)
-        if st.allow(s["kind"], s["key"], now) and s["kind"] in LIVE_KINDS:
-            fired = True
-            upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
-            extra = ""
+    send = [s for s in sigs
+            if aligned_ok(df, s["kind"], s["signal"]) and st.allow(s["kind"], s["key"], now)
+            and s["kind"] in LIVE_KINDS]
+    groups = {}
+    for s in send:
+        groups.setdefault(s["signal"], []).append(s)      # same candle + same direction = one alert
+    for signal, grp in groups.items():
+        fired = True
+        upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
+        extra = ""
+        for s in grp:
             if s["kind"] == "INDICATION":
                 side = "below" if s["d"] > 0 else "above"
                 replaced = (f"Replaces the earlier {'CALL' if st.indication['d'] > 0 else 'PUT'} indication.\n"
                             if st.indication else "")
                 extra = f"{replaced}Invalidated if Nifty closes {side} {s['inval']:,.1f}.\n"
                 st.indication = {"d": s["d"], "entry": s["entry"], "inval": s["inval"], "time": ts}
-            note = ("NOTE: against price vs the day's open (lower odds so far)\n"
-                    if ALIGN_MODE == "tag" and not is_aligned(df, s["kind"], s["signal"]) else "")
-            msgs.append(f"{s['kind']}: {s['signal']}\n{conf[s['kind']]}\n{upd}{note}"
-                        f"Nifty {price:,.2f} at {ts} IST\n" + "\n".join(s["why"]) + "\n" + extra
-                        + "\nNot financial advice. Use your own stop-loss.")
+        note = ("NOTE: against price vs the day's open (lower odds so far)\n"
+                if ALIGN_MODE == "tag" and any(not is_aligned(df, s["kind"], signal) for s in grp) else "")
+        if len(grp) == 1:
+            s = grp[0]
+            head = f"{s['kind']}: {signal}\n{conf[s['kind']]}\n"
+            body = "\n".join(s["why"])
+        else:
+            head = (" + ".join(s["kind"] for s in grp) + f": {signal}\n"
+                    + " | ".join(f"{s['kind']}: {conf[s['kind']]}" for s in grp) + "\n")
+            body = "\n".join(f"[{s['kind']}] " + " / ".join(x.lstrip("✓•✗ ") for x in s["why"][:3]) for s in grp)
+        msgs.append(f"{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{body}\n{extra}"
+                    "\nNot financial advice. Use your own stop-loss.")
     if fired:
         st.watch = None
         return msgs
@@ -765,21 +776,33 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
         out += ["", "How each did, points in the signal's direction (30m / 60m: best/worst/net):"]
         total, nets = 0.0, 0
         against_sum = against_n = with_sum = with_n = 0
-        for t, kind, sig, i in found[:30]:
+        merged, order = {}, []
+        for t, kind, sig, i in found:
+            if kind == "OPENING BREAK":
+                continue
+            key = (t, sig, i)                       # same candle + same direction = one trade
+            if key not in merged:
+                merged[key] = []
+                order.append(key)
+            merged[key].append(kind)
+        for t, kind, sig, i in found:
             if kind == "OPENING BREAK":
                 out.append(opening_break_outcome(d, t, sig, i))   # held to 15:15, so not added to the 60m sum
-                continue
-            line, net60 = outcome_line(d, t, kind, sig, i)
-            tagged = ALIGN_MODE != "off" and not is_aligned(d.iloc[: i + 1], kind, sig)
+        for key in order[:30]:
+            t, sig, i = key
+            kinds = merged[key]
+            line, net60 = outcome_line(d, t, " + ".join(kinds), sig, i)
+            tagged = ALIGN_MODE != "off" and any(
+                k in ALIGN_KINDS and not is_aligned(d.iloc[: i + 1], k, sig) for k in kinds)
             out.append(line + ("  [against open]" if tagged else ""))
             if net60 is not None:
                 total, nets = total + net60, nets + 1
-                if kind in ALIGN_KINDS:
+                if any(k in ALIGN_KINDS for k in kinds):
                     if tagged:
                         against_sum, against_n = against_sum + net60, against_n + 1
                     else:
                         with_sum, with_n = with_sum + net60, with_n + 1
-        out.append(f"Sum of 60m nets: {total:+.0f} pts over {nets} signals")
+        out.append(f"Sum of 60m nets: {total:+.0f} pts over {nets} trades (same-minute, same-direction signals counted once)")
         if ALIGN_MODE != "off" and (against_n or with_n):
             out.append(f"In line with the open: {with_n} signals {with_sum:+.0f} | against the open: {against_n} signals {against_sum:+.0f}")
     out += ["", "Not financial advice."]
