@@ -76,6 +76,11 @@ def make_candle_video(src, path="day_candles.mp4", events=None, step=2, fps=12, 
     vx = df["vol_x"].fillna(0).values if "vol_x" in df else None
     e9 = df["ema9"].values if "ema9" in df else None
     e21 = df["ema21"].values if "ema21" in df else None
+    # VWAP is a futures number: move it onto the Nifty scale by subtracting the futures premium (30-minute median, so it stays smooth)
+    vw = None
+    if "fut_vwap" in df and "fut_close" in df and df["fut_vwap"].notna().any():
+        prem = (df["fut_close"] - df["close"]).rolling(30, min_periods=1).median()
+        vw = (df["fut_vwap"] - prem).values
     orh, orl = h[:15].max(), l[:15].min()
     up, dn, ink, mut, grid, bg, amber = "#2fbf71", "#ef5b5b", "#f1efe8", "#9a978d", "#2b2b29", "#161615", "#e8a93a"
     seq = []                                   # (candle index shown, alert number being highlighted or None)
@@ -94,7 +99,7 @@ def make_candle_video(src, path="day_candles.mp4", events=None, step=2, fps=12, 
     span = h.max() - l.min()
 
     fig.text(0.01, 0.01, "OB opening break   BO breakout   PB pullback   TR trend reverse   FB fake breakout   "
-             "white = EMA9, amber = EMA21", color=mut, fontsize=6.5)
+             "white = EMA9, amber = EMA21, blue = VWAP", color=mut, fontsize=6.5)
 
     def style(a_):
         a_.set_facecolor(bg)
@@ -113,6 +118,8 @@ def make_candle_video(src, path="day_candles.mp4", events=None, step=2, fps=12, 
         if e9 is not None:
             ax.plot(idx, e9[:k + 1], color=ink, lw=0.8, alpha=0.8, label="EMA9")
             ax.plot(idx, e21[:k + 1], color=amber, lw=0.8, alpha=0.9, label="EMA21")
+        if vw is not None:
+            ax.plot(idx, vw[:k + 1], color="#4cc9f0", lw=1.3, label="VWAP")
         if k >= 14:
             ax.hlines([orh, orl], 14, k, colors=mut, linestyles="dashed", linewidth=0.8)
             ax.text(k, orh, " opening range", color=mut, fontsize=7, va="bottom", ha="right")
