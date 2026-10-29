@@ -16,6 +16,8 @@ on:
         description: "Optional window end HH:MM, e.g. 12:50"
         required: false
         default: ""
+permissions:
+  contents: write            # needed so the run can save the day's CSV into the repo (data/ folder)
 jobs:
   dayfile:
     runs-on: ubuntu-latest
@@ -45,3 +47,11 @@ jobs:
             nifty_*.csv
             nifty_*.mp4
           if-no-files-found: ignore
+      - name: Save the day CSV in the repo for the month report
+        run: |
+          mkdir -p data
+          cp nifty_*.csv data/ 2>/dev/null || true
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add data
+          git diff --cached --quiet || (git commit -m "Add day data" && git pull --rebase && git push)
