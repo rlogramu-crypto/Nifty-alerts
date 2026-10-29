@@ -1,0 +1,33 @@
+name: Month report
+on:
+  schedule:
+    - cron: "0 11 28-31 * *"   # 16:30 IST on days 28-31; the script only runs on the real last day of the month
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Month YYYY-MM (blank = this month)"
+        required: false
+        default: ""
+jobs:
+  month:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pandas requests
+      - run: python monthly_report.py
+        env:
+          MONTH: ${{ inputs.month }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: month-report
+          path: |
+            month_*.csv
+            alerts_*.csv
+          if-no-files-found: ignore
