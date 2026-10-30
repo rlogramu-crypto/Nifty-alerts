@@ -1,0 +1,36 @@
+name: Backfill days
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First date YYYY-MM-DD"
+        required: true
+      end:
+        description: "Last date YYYY-MM-DD (blank = same as first)"
+        required: false
+        default: ""
+      overwrite:
+        description: "yes = redo days that are already saved"
+        required: false
+        default: "no"
+permissions:
+  contents: write
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python backfill.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+          OVERWRITE: ${{ inputs.overwrite }}
+          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
