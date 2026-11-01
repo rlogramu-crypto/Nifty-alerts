@@ -24,13 +24,21 @@ def save_to_repo(msg):
         subprocess.run(["git", "push"], check=False)
 
 
+def parse_date(text):
+    """Accepts 2026-10-01, 2026/10/1, 2026.10.1 or 2026-10-1."""
+    y, m, d = (int(x) for x in text.strip().replace("/", "-").replace(".", "-").split("-"))
+    return datetime(y, m, d).date()
+
+
 def main():
-    start = datetime.strptime(os.environ["START"].strip(), "%Y-%m-%d").date()
-    end = datetime.strptime((os.environ.get("END") or os.environ["START"]).strip(), "%Y-%m-%d").date()
+    start = parse_date(os.environ["START"])
+    end = parse_date(os.environ.get("END") or os.environ["START"])
+    end = min(end, datetime.now(D.IST).date())      # nothing to fetch for future days
     overwrite = os.environ.get("OVERWRITE", "").strip().lower() == "yes"
     key = name = None
     try:
-        key, name, _ = D.get_future_key()
+        fk = D.get_future_key()          # v7.1 returns 3 values, v8 returns 2
+        key, name = fk[0], fk[1]
     except Exception as e:
         print(f"Futures lookup failed ({e}); days will be saved without volume and VWAP.")
     os.makedirs("data", exist_ok=True)
