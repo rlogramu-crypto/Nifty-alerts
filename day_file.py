@@ -11,7 +11,7 @@ CSV columns (one row per minute):
   open/high/low/close (Nifty), chg, fut_close, fut_vol, vol_x (vs prior 20 min avg),
   fut_vwap (running day VWAP), fut_vs_vwap, ema9/ema21/ema50, rsi14,
   vs_or_high / vs_or_low (points beyond the 15-min opening range),
-  indication, strong (BREAKOUT), fake, pullback, reverse, opening_break = CALL/PUT on every minute the condition was true.
+  indication, strong (BREAKOUT), fake, pullback, reverse, opening_break, swing = CALL/PUT on every minute the condition was true.
   weak_trend = a rough trend score (never sent as an alert; it is ON for most of a trend day)
   (raw, before the 15-minute cooldown, so you will see runs of the same signal)
 """
@@ -29,9 +29,9 @@ from nifty_scanner_upstox import (CALL, IST, INDEX_KEY, OPENING_RANGE_MIN, PUT, 
 
 
 # ---------------------------------------------------------------- candle video
-VIDEO_KINDS = (("opening_break", "Opening break"), ("strong", "Breakout"), ("fake", "Fake breakout"),
+VIDEO_KINDS = (("opening_break", "Opening break"), ("swing", "Swing"), ("strong", "Breakout"), ("fake", "Fake breakout"),
                ("pullback", "Pullback"), ("reverse", "Trend reverse"))
-SHORT = {"Opening break": "OB", "Breakout": "BO", "Fake breakout": "FB", "Pullback": "PB", "Trend reverse": "TR"}
+SHORT = {"Opening break": "OB", "Breakout": "BO", "Fake breakout": "FB", "Pullback": "PB", "Trend reverse": "TR", "Swing": "SW"}
 VIDEO_COOLDOWN_MIN = 15
 VIDEO_LAST_ALERT = (15, 15)      # no alert marker after this time (use (13, 30) to match the old cutoff)
 
@@ -98,7 +98,7 @@ def make_candle_video(src, path="day_candles.mp4", events=None, step=2, fps=12, 
     axv = fig.add_subplot(gs[1], sharex=ax) if has_vol else None
     span = h.max() - l.min()
 
-    fig.text(0.01, 0.01, "OB opening break   BO breakout   PB pullback   TR trend reverse   FB fake breakout   "
+    fig.text(0.01, 0.01, "OB opening break   BO breakout   PB pullback   TR trend reverse   FB fake breakout   SW swing   "
              "white = EMA9, amber = EMA21, blue = VWAP", color=mut, fontsize=6.5)
 
     def style(a_):
@@ -266,7 +266,7 @@ def build_table(df: pd.DataFrame, fut) -> pd.DataFrame:
     t["vs_or_low"] = df["Close"] - orng["Low"].min()
     t.loc[t.index[:OPENING_RANGE_MIN], ["vs_or_high", "vs_or_low"]] = float("nan")
     names = {"INDICATION": "indication", "BREAKOUT": "strong", "FAKE BREAKOUT": "fake", "PULLBACK": "pullback",
-             "TREND REVERSE": "reverse", "OPENING BREAK": "opening_break"}
+             "TREND REVERSE": "reverse", "OPENING BREAK": "opening_break", "SWING": "swing"}
     cols = {k: [] for k in ["weak_trend"] + list(names.values())}
     for i in range(len(df)):
         d = df.iloc[: i + 1]
@@ -327,7 +327,8 @@ def main():
         raise SystemExit("No data.")
     fut = None
     try:
-        key, name, _expiry = get_future_key()   # v7 returns 3 values (the old 2-value unpack failed and dropped all futures columns)
+        fk = get_future_key()                   # v7.1 returns 3 values, v8 returns 2: take the first two either way
+        key, name = fk[0], fk[1]
         fut = fetch_day(key, day) if key else None
         fut_note = f"futures {name}" if fut is not None and len(fut) else "futures data not found"
     except Exception as e:
