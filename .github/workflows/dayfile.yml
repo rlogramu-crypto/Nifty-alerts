@@ -1,7 +1,9 @@
 name: Day data file
 on:
-  schedule:
-    - cron: "10 10 * * 1-5"   # 15:40 IST, Mon-Fri (blank date = today)
+  schedule:                    # backup attempts; the scanner normally starts this itself right after the close
+    - cron: "10 10 * * 1-5"    # 15:40 IST
+    - cron: "40 10 * * 1-5"    # 16:10 IST
+    - cron: "10 11 * * 1-5"    # 16:40 IST
   workflow_dispatch:
     inputs:
       date:
@@ -19,7 +21,24 @@ on:
 permissions:
   contents: write            # needed so the run can save the day's CSV into the repo (data/ folder)
 jobs:
+  check:                     # a schedule run does nothing if today's file is already saved
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.d.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        run: |
+          RUN=yes
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -f "data/nifty_$(TZ=Asia/Kolkata date +%F).csv" ]; then
+            RUN=no
+            echo "Today's file is already saved, so this run stops."
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
   dayfile:
+    needs: check
+    if: needs.check.outputs.run == 'yes'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
