@@ -1,7 +1,10 @@
 name: Nifty alerts
 on:
-  schedule:
-    - cron: "5 3 * * 1-5"      # 08:35 IST, Mon-Fri (GitHub may start it late)
+  schedule:                    # four attempts, because GitHub often delays or drops a single schedule. Only the first one that arrives starts the scanner.
+    - cron: "40 2 * * 1-5"     # 08:10 IST
+    - cron: "10 3 * * 1-5"     # 08:40 IST
+    - cron: "40 3 * * 1-5"     # 09:10 IST
+    - cron: "10 4 * * 1-5"     # 09:40 IST
   workflow_dispatch:
     inputs:
       relay:
@@ -12,16 +15,36 @@ on:
         description: "Last TREND status (set by the hand-over)"
         required: false
         default: ""
-concurrency:
-  group: nifty-scanner          # never two scanners at once (no double alerts)
-  cancel-in-progress: false
 permissions:
   contents: read
-  actions: write                # lets the run start its successor
+  actions: write                # lets the run start its successor and the day-file job
 jobs:
+  check:                        # decides whether this run should start a scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN=yes
+          if [ "${{ inputs.relay }}" != "yes" ]; then
+            OLDER=$(gh run list --workflow "Nifty alerts" --repo "$GITHUB_REPOSITORY" --status in_progress --json databaseId --jq "[.[] | select(.databaseId < ${{ github.run_id }})] | length")
+            if [ "$OLDER" -gt 0 ]; then RUN=no; echo "A scanner is already running, so this run stops."; fi
+            HM=$(TZ=Asia/Kolkata date +%H%M)
+            if [ "${{ github.event_name }}" = "schedule" ] && [ "$HM" -ge 1530 ]; then RUN=no; echo "Market is closed ($HM IST), so this late schedule does nothing."; fi
+          fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
   scan:
+    needs: check
+    if: needs.check.outputs.run == 'yes'
     runs-on: ubuntu-latest
     timeout-minutes: 360        # GitHub's maximum
+    concurrency:
+      group: nifty-scanner      # never two scanners at once (no double alerts)
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,3 +66,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run scanner.yml --repo "$GITHUB_REPOSITORY" -f relay=yes -f trend="$(cat relay_needed)"
+      - name: Start the day-file job after the close
+        if: always() && hashFiles('relay_needed') == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          HM=$(TZ=Asia/Kolkata date +%H%M)
+          if [ "$HM" -ge 1530 ] && [ "$HM" -lt 2000 ]; then
+            gh workflow run "Day data file" --repo "$GITHUB_REPOSITORY"
+          else
+            echo "Not after the close ($HM IST); day-file job not started."
+          fi
