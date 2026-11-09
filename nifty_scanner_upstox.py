@@ -1,6 +1,32 @@
 """
-Nifty 50 multi-signal scanner v8 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v8.3 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
+
+v8.3 change: ACCURACY MODE (ACCURACY_MODE = True). Fewer, stricter alerts, built for a range day like 9 Nov 2026 where
+the older rules flipped CALL/PUT about 20 times. Not back-tested yet, so check it on your CSV days before trusting it.
+  - only OPENING BREAK and BREAKOUT are sent live (the two with the best past numbers); SWING, PULLBACK and FAKE
+    BREAKOUT are counted in the end-of-day summary only
+  - OPENING BREAK is skipped when its stop (range middle) is more than OB_MAX_RISK_PTS from the entry (a spiky
+    first candle makes the range far too wide)
+  - no alert in the opposite direction within FLIP_COOLDOWN_MIN minutes of the last live alert (BREAKOUT is exempt and always sends)
+  - SWING / PULLBACK / FAKE BREAKOUT are blocked when the last CHOP_WINDOW candles crossed VWAP or EMA9/EMA21
+    CHOP_MAX_CROSSES times or more (only matters if you add them back to LIVE_KINDS)
+  - SWING / PULLBACK / FAKE BREAKOUT against price vs the day's open are blocked instead of tagged (BREAKOUT is exempt)
+  Set ACCURACY_MODE = False to get the v8.2 behaviour back.
+
+v8.2 change: NET BUYING / SELLING VOLUME (context only, no signal rule changed). Futures volume of each 1-minute
+candle is counted as buying if the futures candle closed above the previous close and as selling if below.
+  - alerts and the TREND message carry "Net volume last 15m" and say when the flow is against the signal
+  - the per-candle console line shows the same figure
+  - the end-of-day summary lists net volume hour by hour next to the price move, and the high-volume candles
+    (2x+) that came at an RSI extreme (possible exhaustion)
+  Why: on 9 Nov 2026 the volume spikes alone did not give direction (correlation with the move's direction about
+  0.06), the sustained net flow did. One day only, a rough proxy (a whole candle is given to one side), so it is
+  shown, not used as a filter. Tune the FLOW_* settings.
+
+v8.1 changes (checked on 23 trading days, 1 Oct - 9 Nov 2026):
+  - TREND REVERSE is no longer sent live: 33 alerts, 36% won, -286 pts (the last 5 on 9 Nov all lost). Still counted in the summary.
+  - SWING alerts that go against price vs the day's open are tagged "lower odds" (51% won with the open, 38% against).
 
 v8 change: new SWING alert (top/bottom reversal). Replay of the 12 days (8-26 Oct 2026), held until the next swing
 signal or 15:00, stop 5 pts beyond the swing extreme, no new swing alert after 13:30:
@@ -25,7 +51,7 @@ Alert types (each labelled with a confidence level):
   BREAKOUT       HIGH     strong, high-volume break of the day's range that holds 2 candles (before 12:00 only)
   FAKE BREAKOUT  LOWER    high-volume break that fails and closes back inside the range
   PULLBACK       LOWER    trend continuation: bounce against the trend fails
-  TREND REVERSE  LOWER    fresh EMA cross + VWAP flip + break of recent structure
+  TREND REVERSE  summary only (not sent live since v8.1)  fresh EMA cross + VWAP flip + break of recent structure
   SWING          MEDIUM   40-pt reversal off a day top (PUT) or bottom (CALL), held to the next swing signal (v8)
   INDICATION     summary  early read on 8-24 candles, counted at end of day only
   TREND          info     UP / DOWN status when the weak-trend score holds 10 min (context, not an entry)
@@ -59,6 +85,12 @@ SWING_STOP_BUFFER = 5        # stop idea = swing extreme +/- this many points
 SWING_EMA_CONFIRM = False    # True: CALL needs close above EMA9, PUT needs close below (no consistent gain in the replay)
 SWING_START = (9, 20)        # swing tracking starts here (the first 5 candles are ignored)
 SWING_EXIT = (15, 0)         # exit idea for an open swing idea; also the last candle used in the end-of-day result
+
+# ---- v8.2 net buying/selling volume (context only, edit to tune) ----
+FLOW_WINDOW = 15             # candles used for the rolling "net volume" figure in alerts
+FLOW_DOM_PCT = 25            # net volume of this % of total or more = buyers (or sellers) dominating
+FLOW_HV_X = 2.0              # a "high-volume" candle is at least this many times the 20-candle average
+FLOW_RSI_LOW, FLOW_RSI_HIGH = 25, 80   # high volume at these RSI extremes is listed as possible exhaustion
 
 # ---- Strong-breakout settings ----
 OPENING_RANGE_MIN = 15       # first 15 minutes = opening range
@@ -107,12 +139,21 @@ TREND_HOLD_MIN = 10
 MAX_RUN_MIN = float(os.environ.get("SCAN_MAX_MINUTES", "0") or 0)   # 0 = never hand over (server use)
 
 # ---- What is sent live vs only counted in the end-of-day summary ----
-LIVE_KINDS = ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "TREND REVERSE", "SWING")
+# ---- v8.3 ACCURACY MODE: fewer, stricter alerts (False = v8.2 behaviour) ----
+ACCURACY_MODE = True
+LIVE_KINDS = (("OPENING BREAK", "BREAKOUT") if ACCURACY_MODE
+              else ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING"))
+OB_MAX_RISK_PTS = 60         # skip OPENING BREAK if the stop (range middle) is further than this from the entry
+FLIP_COOLDOWN_MIN = 30       # no live alert in the opposite direction within this many minutes of the last live alert
+CHOP_WINDOW = 30             # candles checked for chop
+CHOP_MAX_CROSSES = 3         # this many VWAP or EMA9/21 crosses in the window = choppy, block
+CHOP_KINDS = ("SWING", "PULLBACK", "FAKE BREAKOUT")   # kinds the chop filter applies to
 SEND_WAIT_NOTES = False
 
 # ---- Alignment filter: signals that go against price vs the day's open ----
-ALIGN_MODE = "tag"            # "tag" = send but mark "against the open"; "block" = skip them; "off" = ignore
-ALIGN_KINDS = ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK")
+ALIGN_MODE = "block" if ACCURACY_MODE else "tag"   # "tag" = send but mark "against the open"; "block" = skip them; "off" = ignore
+ALIGN_KINDS = tuple(k for k in ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING")
+                    if not (ACCURACY_MODE and k == "BREAKOUT"))   # v8.3: a volume BREAKOUT is never blocked by the open-alignment filter
 
 # ---- Opening read (09:30) and OPENING BREAK ----
 SEND_OPENING_READ = True
@@ -295,7 +336,8 @@ def observation(df: pd.DataFrame, fut) -> str:
         line += f"\nFutures volume {v:,.0f} ({ratio}){late}"
     else:
         line += "\nFutures volume n/a"
-    return line
+    fl = flow_note(df, fut).strip()
+    return line + ("\n" + fl if fl else "")
 
 
 def early_signal(df: pd.DataFrame, fut=None) -> str:
@@ -351,6 +393,67 @@ def indicators(df: pd.DataFrame, fut) -> pd.DataFrame:
         vwap = (tp * vol).cumsum() / vol.cumsum().replace(0, float("nan"))
         ind["vwap_gap"] = f["Close"] - vwap
     return ind
+
+
+def net_volume(fut):
+    """Signed futures volume per candle: + if the futures candle closed above the previous close (buying),
+    - if below (selling), 0 if unchanged or first. Returns None when there is no futures volume."""
+    if fut is None or not len(fut) or fut["Volume"].sum() <= 0:
+        return None
+    return np.sign(fut["Close"].diff()).fillna(0) * fut["Volume"]
+
+
+def flow_stats(df, fut, window=None):
+    """(net, total, pct) over the last `window` futures candles up to the latest index candle, or None."""
+    window = window or FLOW_WINDOW
+    nv = net_volume(fut)
+    if nv is None or not len(df):
+        return None
+    nv = nv[nv.index <= df.index[-1]].iloc[-window:]
+    tot = float(fut["Volume"][fut.index <= df.index[-1]].iloc[-window:].sum())
+    if not len(nv) or tot <= 0:
+        return None
+    net = float(nv.sum())
+    return net, tot, net / tot * 100
+
+
+def flow_note(df, fut, signal=None) -> str:
+    """One line (ending in a newline) with the recent net volume; empty if there is no futures volume.
+    With a signal, it also says when the flow points the other way."""
+    s = flow_stats(df, fut)
+    if s is None:
+        return ""
+    net, tot, pct = s
+    word = "buyers dominating" if pct >= FLOW_DOM_PCT else "sellers dominating" if pct <= -FLOW_DOM_PCT else "balanced"
+    line = f"Net volume last {FLOW_WINDOW}m: {net / 1000:+,.0f}k ({pct:+.0f}% of {tot / 1000:,.0f}k), {word}"
+    if (signal == CALL and pct <= -FLOW_DOM_PCT) or (signal == PUT and pct >= FLOW_DOM_PCT):
+        line += "  <- flow is against this signal"
+    return line + "\n"
+
+
+def flow_eod_lines(d, fut):
+    """End-of-day: net volume by hour next to the price move, and high-volume candles at an RSI extreme."""
+    nv = net_volume(fut)
+    if nv is None:
+        return []
+    out = ["NET VOLUME by hour (futures; up candle = buying, down candle = selling):"]
+    px = d["Close"].diff().fillna(d["Close"] - d["Open"])
+    for h in sorted(set(nv.index.hour)):
+        m = nv[nv.index.hour == h]
+        tot = float(fut["Volume"][fut.index.hour == h].sum())
+        if tot > 0:
+            out.append(f"{h:02d}:00  net {m.sum() / 1000:+,.0f}k ({m.sum() / tot * 100:+.0f}%) of {tot / 1000:,.0f}k"
+                       f" | price {px[px.index.hour == h].sum():+.0f}")
+    day_tot = float(fut["Volume"].sum())
+    out.append(f"Day: net {nv.sum() / 1000:+,.0f}k ({nv.sum() / day_tot * 100:+.0f}%) of {day_tot / 1000:,.0f}k")
+    ind = indicators(d, fut)
+    hv = ind[ind["vol_x"] >= FLOW_HV_X]
+    ex = hv[(hv["rsi"] <= FLOW_RSI_LOW) | (hv["rsi"] >= FLOW_RSI_HIGH)]
+    out.append(f"High-volume candles ({FLOW_HV_X:g}x+): {len(hv)}. At an RSI extreme "
+               f"(<= {FLOW_RSI_LOW} or >= {FLOW_RSI_HIGH}, possible exhaustion): "
+               + (", ".join(f"{t:%H:%M} (RSI {r.rsi:.0f}, {r.vol_x:.1f}x)" for t, r in ex.head(8).iterrows())
+                  + (f" +{len(ex) - 8} more" if len(ex) > 8 else "") if len(ex) else "none"))
+    return out + [""]
 
 
 def level_at(df: pd.DataFrame, j: int, d: int):
@@ -523,7 +626,7 @@ KINDS = (("INDICATION", "SUMMARY only (3 of 10 won)"),
          ("BREAKOUT", "HIGH confidence (10 of 13 won before 12:00)"),
          ("FAKE BREAKOUT", "LOWER confidence (only 5 seen, 2 won)"),
          ("PULLBACK", "LOWER confidence (59 seen, 58% won)"),
-         ("TREND REVERSE", "LOWER confidence (20 seen, 60% won, small gains)"),
+         ("TREND REVERSE", "SUMMARY only (33 seen, 36% won, -286 pts)"),
          ("OPENING BREAK", "MEDIUM confidence (7 of 10 won with the stop)"),
          ("SWING", "MEDIUM confidence (89 seen, about 44% won, +1,121 pts held to the next swing; late by design)"))
 
@@ -550,6 +653,32 @@ def time_ok(df, kind) -> bool:
     return not (kind == "BREAKOUT" and hm >= BREAKOUT_LAST)
 
 
+def choppy(ind):
+    """(is_choppy, vwap_crosses, ema_crosses) over the last CHOP_WINDOW candles."""
+    w = ind.iloc[-CHOP_WINDOW:]
+
+    def crosses(x):
+        sg = np.sign(x.dropna())
+        sg = sg[sg != 0]
+        return int((sg != sg.shift()).sum() - 1) if len(sg) else 0
+    vc, ec = crosses(w["vwap_gap"]), crosses(w["ema9"] - w["ema21"])
+    return vc >= CHOP_MAX_CROSSES or ec >= CHOP_MAX_CROSSES, vc, ec
+
+
+def accuracy_ok(df, ind, s, st) -> bool:
+    """v8.3: opposite-direction flips within FLIP_COOLDOWN_MIN are blocked, and chop blocks CHOP_KINDS."""
+    if not ACCURACY_MODE or s["kind"] not in LIVE_KINDS or s["kind"] == "BREAKOUT":
+        return True   # a volume BREAKOUT is never blocked here
+    if (st.last_dir is not None and s["signal"] != st.last_dir
+            and (df.index[-1] - st.last_dir_t).total_seconds() < FLIP_COOLDOWN_MIN * 60):
+        return False
+    return not (s["kind"] in CHOP_KINDS and choppy(ind)[0])
+
+
+def mark_dir(st, df, signal) -> None:
+    st.last_dir, st.last_dir_t = signal, df.index[-1]
+
+
 def detect_opening_break(df):
     """OPENING BREAK: the first close beyond the 09:15-09:29 range (09:30 to OPENING_BREAK_UNTIL)."""
     n = len(df)
@@ -566,6 +695,8 @@ def detect_opening_break(df):
     c = float(closes.iloc[-1])
     up = c > hi
     mid = float((hi + lo) / 2)
+    if ACCURACY_MODE and abs(c - mid) > OB_MAX_RISK_PTS:
+        return None  # v8.3: range too wide (stop too far), skip
     return {"signal": CALL if up else PUT, "key": f"{t:%Y-%m-%d}", "entry": c, "stop": mid, "d": 1 if up else -1,
             "why": [f"First close {'above' if up else 'below'} the opening range {lo:,.1f} to {hi:,.1f}",
                     f"Stop idea: the range middle {mid:,.1f} ({abs(c - mid):.0f} pts risk). "
@@ -736,6 +867,7 @@ class State:
         self.opening_read_done = False
         self.ob = None          # {"d", "entry", "stop", "time"} while an opening break idea is open
         self.swing = None       # same shape, while a swing idea is open (v8)
+        self.last_dir, self.last_dir_t = None, None   # v8.3: direction and candle time of the last live alert
 
     def allow(self, kind, key, now) -> bool:
         if key == self.last_key.get(kind):
@@ -794,18 +926,21 @@ def process_candle(df, fut, now, st: State) -> list:
             up = td == CALL
             msgs.append(f"TREND {'UP' if up else 'DOWN'} (held {TREND_HOLD_MIN} min)\n"
                         f"Nifty {price:,.2f} at {ts} IST\n"
+                        f"{flow_note(df, fut)}"
                         f"The weak-trend score has pointed {'up' if up else 'down'} for {TREND_HOLD_MIN} minutes in a row.\n"
                         f"Bias: favour {'CALL' if up else 'PUT'} setups and be careful with the opposite side.\n"
                         f"Context only, not an entry. Choppy days flip it often.\n\nNot financial advice.")
     fired = False
     send = [s for s in sigs
             if time_ok(df, s["kind"]) and aligned_ok(df, s["kind"], s["signal"])
-            and st.allow(s["kind"], s["key"], now) and s["kind"] in LIVE_KINDS]
+            and s["kind"] in LIVE_KINDS and accuracy_ok(df, ind, s, st)
+            and st.allow(s["kind"], s["key"], now)]
     groups = {}
     for s in send:
         groups.setdefault(s["signal"], []).append(s)      # same candle + same direction = one alert
     for signal, grp in groups.items():
         fired = True
+        mark_dir(st, df, signal)
         upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
         for s in grp:
             if s["kind"] == "OPENING BREAK":
@@ -826,7 +961,7 @@ def process_candle(df, fut, now, st: State) -> list:
             head = (" + ".join(s["kind"] for s in grp) + f": {signal}\n"
                     + " | ".join(f"{s['kind']}: {conf[s['kind']]}" for s in grp) + "\n")
             body = "\n".join(f"[{s['kind']}] " + " / ".join(x.lstrip("✓•✗ ") for x in s["why"][:3]) for s in grp)
-        msgs.append(f"{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{body}\n"
+        msgs.append(f"{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{flow_note(df, fut, signal)}{body}\n"
                     "\nNot financial advice. Use your own stop-loss.")
     if fired:
         st.watch = None
@@ -853,7 +988,7 @@ def day_signals(df: pd.DataFrame, fut, skipped=None, late=None):
     for i in range(IND_MIN_CANDLES - 1, len(df)):
         d = df.iloc[: i + 1]
         f = fut[fut.index <= d.index[-1]] if fut is not None else None
-        sigs, _ = scan_candle(d, f)
+        sigs, ind_d = scan_candle(d, f)
         for s in sigs:
             if not time_ok(d, s["kind"]):
                 if late is not None and st_late.allow(s["kind"], s["key"], d.index[-1]):
@@ -863,8 +998,12 @@ def day_signals(df: pd.DataFrame, fut, skipped=None, late=None):
                 if skipped is not None and st_skip.allow(s["kind"], s["key"], d.index[-1]):
                     skipped.append((d.index[-1], s["kind"], s["signal"], i))
                 continue
+            if not accuracy_ok(d, ind_d, s, st):
+                continue
             if st.allow(s["kind"], s["key"], d.index[-1]):
                 found.append((d.index[-1], s["kind"], s["signal"], i))
+                if s["kind"] in LIVE_KINDS:
+                    mark_dir(st, d, s["signal"])
     return found
 
 
@@ -898,6 +1037,7 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
     out.append("TREND (weak-trend score held %d min): " % TREND_HOLD_MIN
                + (", ".join(f"{x} {t:%H:%M}" for t, x in ev) if ev else "none"))
     out.append("")
+    out += flow_eod_lines(d, fut.between_time("09:15", "15:30") if fut is not None else None)
     for kind, conf in KINDS:
         row = []
         for sig, name in ((CALL, "CALL"), (PUT, "PUT")):
@@ -983,7 +1123,7 @@ def sync_futures(df, fut, fut_key, retries=3, wait=5):
 
 
 def main():
-    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v8).\n")
+    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v8.3).\n")
     fut_key, fut_name = None, None
     try:
         fut_key, fut_name = get_future_key()
@@ -995,7 +1135,7 @@ def main():
     if relay_run:
         send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
     else:
-        send_telegram(f"Nifty scanner v8 started. Live alerts: {', '.join(LIVE_KINDS)}"
+        send_telegram(f"Nifty scanner v8.3 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
                       + f"No BREAKOUT after {BREAKOUT_LAST[0]}:{BREAKOUT_LAST[1]:02d}, nothing new after "
