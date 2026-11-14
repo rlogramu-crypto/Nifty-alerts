@@ -31,10 +31,13 @@ if not token:
     sys.exit("Set the UPSTOX_TOKEN environment variable first (do not paste the token into the script).")
 HEAD = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-def get(path, params=None):
+def get(path, params=None, soft=False):
     r = requests.get(BASE + path, headers=HEAD, params=params, timeout=30)
     if r.status_code != 200:
-        sys.exit(f"Upstox error {r.status_code} on {path}: {r.text[:300]}")
+        msg = f"Upstox error {r.status_code} on {path}: {r.text[:300]}"
+        if soft:
+            raise RuntimeError(msg)
+        sys.exit(msg)
     return r.json().get("data")
 
 def daily_candles(key, days=15):
@@ -63,26 +66,27 @@ v0, v1 = vix[0][4], vix[1][4]
 print(f"Nifty {n[0][:10]}: close {n[4]}, high {n[2]}, low {n[3]}")
 print(f"VIX {v0} ({(v0 / v1 - 1) * 100:+.2f}% 1-day)")
 
-# Nearest expiry
-contracts = get("/v2/option/contract", {"instrument_key": NIFTY})
-today = datetime.now(IST).strftime("%Y-%m-%d")
-expiries = sorted({c["expiry"][:10] for c in contracts if c["expiry"][:10] >= today})
-if not expiries:
-    sys.exit("No upcoming expiry found.")
-expiry = expiries[0]
-
-chain = get("/v2/option/chain", {"instrument_key": NIFTY, "expiry_date": expiry})
-put_oi = {}; call_oi = {}
-for row in chain:
-    k = row["strike_price"]
-    call_oi[k] = (row.get("call_options") or {}).get("market_data", {}).get("oi") or 0
-    put_oi[k] = (row.get("put_options") or {}).get("market_data", {}).get("oi") or 0
-tot_c, tot_p = sum(call_oi.values()), sum(put_oi.values())
-pcr = round(tot_p / tot_c, 2) if tot_c else None
-sup = max(put_oi, key=put_oi.get)
-res = max(call_oi, key=call_oi.get)
-print(f"Expiry {expiry}: PCR {pcr}, max put OI {sup}, max call OI {res}")
-
+# Option chain (needs a valid token; skipped with a warning if it fails)
+pcr = sup = res = None
+expiry = "n/a"
+try:
+    contracts = get("/v2/option/contract", {"instrument_key": NIFTY}, soft=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    expiries = sorted({c["expiry"][:10] for c in contracts if c["expiry"][:10] >= today})
+    expiry = expiries[0]
+    chain = get("/v2/option/chain", {"instrument_key": NIFTY, "expiry_date": expiry}, soft=True)
+    put_oi = {}; call_oi = {}
+    for row in chain:
+        k = row["strike_price"]
+        call_oi[k] = (row.get("call_options") or {}).get("market_data", {}).get("oi") or 0
+        put_oi[k] = (row.get("put_options") or {}).get("market_data", {}).get("oi") or 0
+    tot_c, tot_p = sum(call_oi.values()), sum(put_oi.values())
+    pcr = round(tot_p / tot_c, 2) if tot_c else None
+    sup = max(put_oi, key=put_oi.get)
+    res = max(call_oi, key=call_oi.get)
+    print(f"Expiry {expiry}: PCR {pcr}, max put OI {sup}, max call OI {res}")
+except Exception as e:
+    print(f"WARNING: option chain skipped -> {e}")
 
 vchg = v0 / v1 - 1
 vsig = "Bullish" if vchg <= -0.03 else "Bearish" if vchg >= 0.03 else "Neutral"
@@ -118,6 +122,7 @@ if path and os.path.exists(path):
     ws["B10"] = round(v0, 2); ws["B11"] = round(vchg, 4)
     if pcr is not None:
         ws["B13"] = pcr
-    ws["B14"] = sup; ws["B15"] = res
+    if sup is not None:
+        ws["B14"] = sup; ws["B15"] = res
     wb.save(path)
     print("Excel sheet updated.")
