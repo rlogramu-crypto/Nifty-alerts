@@ -1,7 +1,7 @@
 name: Pre-market
 on:
   schedule:
-    - cron: "0 3 * * 1-5"   # 8:30 AM IST, Mon-Fri (GitHub may start 10-30 min late)
+    - cron: "50 3 * * 1-5"   # 9:20 AM IST, Mon-Fri, after the 9:00-9:15 pre-open (GitHub may start 10-30 min late)
   workflow_dispatch:
 jobs:
   fill:
