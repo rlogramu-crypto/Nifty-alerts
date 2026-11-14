@@ -1,0 +1,47 @@
+name: Trigger Nifty scanner
+# Extra, independent starter for the scanner. It only STARTS "Nifty alerts" (scanner.yml); it never runs the scanner itself.
+# Safe to have many attempts: it does nothing if a scanner is already running or queued, or outside market hours.
+on:
+  schedule:                    # all times are UTC (IST = UTC + 5:30), weekdays only
+    - cron: "50 2 * * 1-5"     # 08:20 IST
+    - cron: "20 3 * * 1-5"     # 08:50 IST
+    - cron: "35 3 * * 1-5"     # 09:05 IST
+    - cron: "50 3 * * 1-5"     # 09:20 IST
+    - cron: "5 4 * * 1-5"      # 09:35 IST
+    - cron: "20 4 * * 1-5"     # 09:50 IST
+    - cron: "0 6 * * 1-5"      # 11:30 IST  recovery if the scanner stopped or a hand-over failed
+    - cron: "0 8 * * 1-5"      # 13:30 IST  recovery
+  workflow_dispatch:           # you can also press Run workflow by hand
+    inputs:
+      force:
+        description: "yes = start even outside 08:00-15:25 IST (the scanner still stops by itself if the market is closed)"
+        required: false
+        default: "no"
+permissions:
+  contents: read
+  actions: write               # needed to start scanner.yml
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start the scanner if it is not running
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          HM=$(TZ=Asia/Kolkata date +%H%M)
+          echo "Now $HM IST"
+          if [ "$FORCE" != "yes" ] && { [ "$HM" -lt 0800 ] || [ "$HM" -ge 1525 ]; }; then
+            echo "Outside 08:00-15:25 IST, nothing to start."
+            exit 0
+          fi
+          RUNNING=$(gh run list --workflow "Nifty alerts" --repo "$GITHUB_REPOSITORY" --status in_progress --json databaseId --jq length)
+          QUEUED=$(gh run list --workflow "Nifty alerts" --repo "$GITHUB_REPOSITORY" --status queued --json databaseId --jq length)
+          echo "Scanner runs in progress: $RUNNING, queued: $QUEUED"
+          if [ "$RUNNING" -gt 0 ] || [ "$QUEUED" -gt 0 ]; then
+            echo "A scanner is already running or waiting, so nothing to start."
+            exit 0
+          fi
+          gh workflow run scanner.yml --repo "$GITHUB_REPOSITORY"
+          echo "Scanner started."
