@@ -166,10 +166,30 @@ if pcr is not None:
 bull = sum(1 for s in signals.values() if s == "Bullish")
 bear = sum(1 for s in signals.values() if s == "Bearish")
 n = len(signals)
+lead = bull - bear
 bias = ("Not enough data" if n < 4 else
-        "Favor CE setups" if bull >= 3 and bull > bear else
-        "Favor PE setups" if bear >= 3 and bear > bull else
-        "Mixed: trade less or skip")
+        "CALL (CE) bias" if bull >= 3 and lead >= 2 else
+        "PUT (PE) bias" if bear >= 3 and -lead >= 2 else
+        "MIXED: no clear direction")
+
+# Live price vs triggers (only after the 9:15 open)
+last = None
+if nt and nt[0][0][:10] == NOW.strftime("%Y-%m-%d") and NOW.hour * 60 + NOW.minute >= 9 * 60 + 15:
+    last = nt[0][4]
+    pos = "above resistance" if hi and last > hi else "below support" if lo and last < lo else "inside range"
+else:
+    pos = None
+if bias.startswith("CALL"):
+    verdict = ("DIRECTION: CALL confirmed. Price is above resistance; enter on a 5-min close above it" if pos == "above resistance"
+               else "DIRECTION: signals say CALL but price is below support. Stay out" if pos == "below support"
+               else f"DIRECTION: CALL bias. Wait for a 5-min close above {f(hi)}")
+elif bias.startswith("PUT"):
+    verdict = ("DIRECTION: PUT confirmed. Price is below support; enter on a 5-min close below it" if pos == "below support"
+               else "DIRECTION: signals say PUT but price is above resistance. Stay out" if pos == "above resistance"
+               else f"DIRECTION: PUT bias. Wait for a 5-min close below {f(lo)}")
+else:
+    verdict = ("DIRECTION: none. Price broke a level but signals are mixed. Skip, or 1 lot with a tight stop" if pos in ("above resistance", "below support")
+               else f"DIRECTION: none. NO TRADE until price breaks {f(lo)} or {f(hi)}")
 
 L = [f"📊 PRE-MARKET {NOW:%a %d-%b-%Y %H:%M} IST",
      "",
@@ -192,8 +212,11 @@ L = [f"📊 PRE-MARKET {NOW:%a %d-%b-%Y %H:%M} IST",
      "",
      f"Signals: {bull} bullish, {bear} bearish, {n - bull - bear} neutral",
      f"BIAS: {bias}",
+     (f"Now: {f(last)} ({pos})" if last else "Now: live price shows after 9:15 IST"),
+     verdict,
      "",
-     "Check yourself: breadth, events (RBI/Fed/CPI/earnings).",
+     "Not included: breadth. If under 40% of stocks are rising, treat a CALL bias as weaker.",
+     "Also check events (RBI/Fed/CPI/earnings).",
      "Plan: 1 lot, 5-pt stop, 10-pt target, max 4 trades, stop after 2 losses.",
      "Info only, not investment advice."]
 msg = "\n".join(L)
