@@ -14,4 +14,4 @@ jobs:
       - run: pip install requests
       - run: python fill_premarket.py
         env:
-          UPSTOX_TOKEN: ${{ secrets.UPSTOX_TOKEN }}
+          UPSTOX_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
