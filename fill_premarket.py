@@ -70,6 +70,12 @@ bk = safe(lambda: candles(BANK, include_today=False), "Bank Nifty")
 close = hi = lo = nchg = None
 if nf and len(nf) >= 2:
     close, hi, lo, nchg = nf[0][4], nf[0][2], nf[0][3], pct(nf)
+# Today's open (available once NSE opens at 9:15 IST)
+open_gap = today_open = None
+nt = safe(lambda: candles(NIFTY, include_today=True), "Nifty today")
+if nt and close and nt[0][0][:10] == NOW.strftime("%Y-%m-%d") and NOW.hour * 60 + NOW.minute >= 9 * 60 + 15:
+    today_open = nt[0][1]
+    open_gap = today_open / close - 1
 bchg = pct(bk) if bk and len(bk) >= 2 else None
 if nchg is not None and bchg is not None:
     signals["Bank Nifty"] = ("Bullish" if nchg > 0 and bchg > 0 else
@@ -103,7 +109,10 @@ gift = gap = None
 if gc and len(gc) >= 1:
     gift = gc[0][4]
     if close: gap = gift / close - 1
-    signals["Gap (GIFT)"] = sig(gap, 0.003, 0.003)
+
+gap_src = open_gap if open_gap is not None else gap
+if gap_src is not None:
+    signals["Gap"] = sig(gap_src, 0.003, 0.003)
 
 world = {}
 for label, name in GLOBAL_WANT:
@@ -162,14 +171,16 @@ bias = ("Not enough data" if n < 4 else
         "Favor PE setups" if bear >= 3 and bear > bull else
         "Mixed: trade less or skip")
 
-L = [f"📊 PRE-MARKET {NOW:%a %d-%b-%Y}",
+L = [f"📊 PRE-MARKET {NOW:%a %d-%b-%Y %H:%M} IST",
      "",
      f"Nifty prev: {f(close)} ({p(nchg)})",
      f"Levels: support {f(lo)} | resistance {f(hi)}",
      f"CE trigger: 5-min close above {f(hi)} (or 15-min high if higher)",
      f"PE trigger: 5-min close below {f(lo)} (or 15-min low if lower)",
      "",
-     f"GIFT Nifty: {f(gift)} ({p(gap)} vs prev close){tag(signals.get('Gap (GIFT)'))}",
+     (f"Today's open: {f(today_open)} ({p(open_gap)} gap){tag(signals.get('Gap'))}" if today_open
+      else f"Today's open: not yet available (run after 9:15 IST)"),
+     f"GIFT Nifty: {f(gift)} ({p(gap)} vs prev close)" + ("" if today_open else tag(signals.get("Gap"))),
      "Global: " + (", ".join(f"{k} {p(v)}" for k, v in world.items()) or "n/a") + tag(signals.get("US/Asia")),
      f"VIX: {f(vix)} ({p(vchg)}){tag(signals.get('VIX'))}",
      f"FII cash net: " + ("n/a" if not fii else f"₹{fii[0]:,.0f} cr ({fii[1]:%d-%b})") + tag(signals.get("FII flow")),
