@@ -1,6 +1,38 @@
 """
-Nifty 50 multi-signal scanner v8.3 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v8.9 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
+
+v8.9 change: every option reading is saved to option_YYYY-MM-DD.csv (OPTION_CSV, every 5 minutes, one file a day) with
+time, expiry, spot, ATM strike, near-the-money call/put OI, PCR (near and whole chain), biggest call/put OI strikes,
+ATM IV and the call/put OI change since the first reading of the day. Send these files with the nifty_ CSVs to backtest.
+
+v8.8 change: OPTION CHAIN context on CALL/PUT alerts (information only): near-the-money PCR, biggest call/put OI
+strikes (resistance/support), OI change since the first reading of the day, ATM IV. Flags "against this signal" when a
+CALL sits just under big call OI, a PUT just over big put OI, or OI is building against the signal. Fetched from the
+Upstox option chain (v2/option/chain) every 5 minutes. NOT backtested (your CSV files have no option data) and the
+live API call was not tested here, so it is context only. If the fetch fails the line is just left out.
+
+v8.7 change: VOLUME + PRICE combination (6 cases: volume up/down x price up/flat/down), information only.
+It adds one line to CALL/PUT, TREND and VOLUME SPIKE messages and sends its own message when the combination
+changes and holds 3 candles (about 6 a day). A line says "against this signal" when the combination points the
+other way. Replay of 27 days: on their own the combinations did NOT predict the next 15 minutes (about 50% up
+in every case), so they are context, never a signal. Settings: COMBO_* below.
+
+v8.6 change: VOLUME SPIKE alert to Telegram (information only). Sent when a candle's futures volume is at least
+VOL_ALERT_X (4.0) times the 20-candle average, at most one per 15 minutes, not in the first 15 minutes. It says
+whether the candle was buying (up) or selling (down), the volume, net volume and RSI. It never changes a CALL/PUT signal.
+Edit the VOLUME SPIKE settings below (VOLUME_ALERT = False turns it off).
+v8.5 change: no time blocks, alerts from 09:15 to 15:30.
+
+v8.4 change: accuracy tuning from a replay of 27 trading days (1 Oct - 13 Nov 2026). Win = +30 pts before -30 pts
+within 60 minutes (a symmetric test, so ~50% is chance). Same-code replay, raw signals before any filter:
+  BREAKOUT 63% (39) | PULLBACK 62% (86) | OPENING BREAK 60% (10) | SWING 54% (246) | FAKE BREAKOUT 42% | TREND REVERSE 51% | INDICATION 50%
+  - PULLBACK is now sent live (best signal in the replay), only 10:00-14:30 (before 10:00 it won 45%, after 14:00 40%)
+  - the chop filter (3+ VWAP or EMA9/21 crosses in 30 candles) now also blocks BREAKOUT and PULLBACK:
+    BREAKOUT 63% -> 72%, PULLBACK 62% -> 69%
+  - the opposite-direction cooldown (30 min) now also applies to BREAKOUT
+  - live set after filters: about 3 alerts a day, about 68% won, Nov 2-13 (7 days) 91% on 11 alerts
+  SWING, FAKE BREAKOUT, TREND REVERSE and INDICATION stay summary-only. Small sample, no costs or slippage, index points.
 
 v8.3 change: ACCURACY MODE (ACCURACY_MODE = True). Fewer, stricter alerts, built for a range day like 9 Nov 2026 where
 the older rules flipped CALL/PUT about 20 times. Not back-tested yet, so check it on your CSV days before trusting it.
@@ -74,8 +106,8 @@ INSTR_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.jso
 REFRESH_SECONDS = 60
 
 # ---- v7 time rules (edit to tune) ----
-NO_NEW_AFTER = (13, 30)      # no new alert of any kind from this time
-BREAKOUT_LAST = (12, 0)      # BREAKOUT is only sent before this time
+NO_NEW_AFTER = (15, 30)      # alerts allowed through the whole session (09:15 to 15:30)
+BREAKOUT_LAST = (15, 30)      # no BREAKOUT time limit
 
 # ---- v8 SWING top/bottom settings (edit to tune) ----
 SWING_PTS = 40               # reversal, in points, off the extreme that confirms a top or bottom
@@ -91,6 +123,41 @@ FLOW_WINDOW = 15             # candles used for the rolling "net volume" figure 
 FLOW_DOM_PCT = 25            # net volume of this % of total or more = buyers (or sellers) dominating
 FLOW_HV_X = 2.0              # a "high-volume" candle is at least this many times the 20-candle average
 FLOW_RSI_LOW, FLOW_RSI_HIGH = 25, 80   # high volume at these RSI extremes is listed as possible exhaustion
+
+# ---- v8.6 VOLUME SPIKE alert to Telegram (information only, not a CALL/PUT signal) ----
+VOLUME_ALERT = True          # send a Telegram message when futures volume spikes
+VOL_ALERT_X = 4.0            # candle volume >= this many times the 20-candle average (3.0 = about 9 a day, 4.0 = about 6)
+VOL_ALERT_COOLDOWN_MIN = 15  # minutes between volume alerts
+VOL_ALERT_MIN_CANDLES = 15   # not in the first 15 minutes (the open is always heavy)
+
+# ---- v8.7 VOLUME + PRICE combination (6 cases, information only) ----
+COMBO_WINDOW = 3             # candles used: average volume ratio and price change over the last 3 candles
+COMBO_VOL_UP_X = 1.5         # volume UP = average volume ratio at or above this
+COMBO_VOL_DOWN_X = 0.7       # volume DOWN = at or below this (in between = normal volume, no combination)
+COMBO_FLAT_PCT = 0.05        # price FLAT = move within +/- this % (about 12 pts)
+COMBO_IN_ALERTS = True       # add the combination line to CALL/PUT, TREND and VOLUME SPIKE messages
+COMBO_ALERT = True           # also send a Telegram message when the combination changes
+COMBO_HOLD = 3               # the new combination must last this many candles before it is sent
+COMBO_GAP_MIN = 15           # minutes between combination messages
+COMBO_SEND = ("UU", "UF", "UD", "DU", "DD")   # U/D = volume up/down, then u/f/d = price up/flat/down; "Df" (quiet) is not sent
+COMBOS = {
+    "Uu": ("Volume UP + price UP", "strong buying, the rise has support", 1),
+    "Uf": ("Volume UP + price FLAT", "heavy trading but price is stuck: big players absorbing at this level, a breakout either way may follow", 0),
+    "Ud": ("Volume UP + price DOWN", "strong selling, the fall has support", -1),
+    "Du": ("Volume DOWN + price UP", "weak rise, few buyers behind it, it can fade", 0),
+    "Df": ("Volume DOWN + price FLAT", "quiet, no interest, wait", 0),
+    "Dd": ("Volume DOWN + price DOWN", "weak fall, few sellers behind it, may pause or bounce", 0),
+}
+
+# ---- v8.8 OPTION CHAIN context: OI, PCR, IV (information only, never blocks or creates a signal) ----
+OPTION_DATA = True           # add an options line to CALL/PUT alerts (silently skipped if the option data cannot be fetched)
+OPTION_CSV = True            # v8.9: save every option reading to option_YYYY-MM-DD.csv (for backtesting OI / PCR later)
+OPTION_CSV_DIR = "."         # folder for the option CSV
+OPT_REFRESH_SEC = 300        # fetch the option chain at most every 5 minutes
+OPT_NEAR_STRIKES = 6         # strikes on each side of the money used for near-the-money OI and PCR
+OPT_WALL_NEAR_PTS = 40       # a CALL this close under the biggest call OI strike (or a PUT this close over the biggest put OI strike) is flagged
+OPT_PCR_BULL, OPT_PCR_BEAR = 1.2, 0.8   # near-the-money PCR at or above / below these = put / call writers dominating
+OPT_OI_SHIFT_PCT = 5         # call or put OI change since the first reading of the day must differ by this many % points to be called out
 
 # ---- Strong-breakout settings ----
 OPENING_RANGE_MIN = 15       # first 15 minutes = opening range
@@ -120,7 +187,8 @@ FAKE_WINDOW = 8
 FAKE_VOL_RATIO = 1.5
 FAKE_MARGIN_PCT = 0.05
 PULL_BOUNCE_WINDOW = 6
-PULL_NO_ENTRY_AFTER = (14, 45)
+PULL_NO_ENTRY_AFTER = (15, 30)
+PULL_NO_ENTRY_BEFORE = (9, 15)   # no pullback time limit
 PULL_MIN_RANGE_PCT = 0.20
 REV_CROSS_WINDOW = 10
 REV_VWAP_WINDOW = 15
@@ -141,19 +209,19 @@ MAX_RUN_MIN = float(os.environ.get("SCAN_MAX_MINUTES", "0") or 0)   # 0 = never 
 # ---- What is sent live vs only counted in the end-of-day summary ----
 # ---- v8.3 ACCURACY MODE: fewer, stricter alerts (False = v8.2 behaviour) ----
 ACCURACY_MODE = True
-LIVE_KINDS = (("OPENING BREAK", "BREAKOUT") if ACCURACY_MODE
+LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK") if ACCURACY_MODE
               else ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING"))
 OB_MAX_RISK_PTS = 60         # skip OPENING BREAK if the stop (range middle) is further than this from the entry
 FLIP_COOLDOWN_MIN = 30       # no live alert in the opposite direction within this many minutes of the last live alert
 CHOP_WINDOW = 30             # candles checked for chop
 CHOP_MAX_CROSSES = 3         # this many VWAP or EMA9/21 crosses in the window = choppy, block
-CHOP_KINDS = ("SWING", "PULLBACK", "FAKE BREAKOUT")   # kinds the chop filter applies to
+CHOP_KINDS = ("BREAKOUT", "PULLBACK", "SWING", "FAKE BREAKOUT")   # v8.4: BREAKOUT and PULLBACK are chop-filtered too
 SEND_WAIT_NOTES = False
 
 # ---- Alignment filter: signals that go against price vs the day's open ----
 ALIGN_MODE = "block" if ACCURACY_MODE else "tag"   # "tag" = send but mark "against the open"; "block" = skip them; "off" = ignore
 ALIGN_KINDS = tuple(k for k in ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING")
-                    if not (ACCURACY_MODE and k == "BREAKOUT"))   # v8.3: a volume BREAKOUT is never blocked by the open-alignment filter
+                    if not (ACCURACY_MODE and k == "BREAKOUT"))   # a BREAKOUT already needs price on the right side of VWAP and EMAs
 
 # ---- Opening read (09:30) and OPENING BREAK ----
 SEND_OPENING_READ = True
@@ -223,6 +291,148 @@ def get_future_key():
         return None, None
     f = min(futs, key=lambda i: i["expiry"])
     return f["instrument_key"], f.get("trading_symbol", "NIFTY FUT")
+
+
+_OPT = {"expiry": None, "day": None, "t": None, "snap": None, "first": None}
+
+
+def option_expiry():
+    """Nearest NIFTY option expiry that is today or later (from the same instruments file as the futures)."""
+    today = datetime.now(IST).date()
+    if _OPT["day"] == today and _OPT["expiry"]:
+        return _OPT["expiry"]
+    r = requests.get(INSTR_URL, timeout=60)
+    r.raise_for_status()
+    data = json.loads(gzip.decompress(r.content))
+    start = datetime.combine(today, datetime.min.time(), tzinfo=IST).timestamp() * 1000
+    exps = sorted({i["expiry"] for i in data
+                   if i.get("segment") == "NSE_FO" and i.get("instrument_type") in ("CE", "PE")
+                   and i.get("underlying_symbol") == "NIFTY" and i.get("expiry", 0) >= start})
+    if not exps:
+        return None
+    _OPT["expiry"] = datetime.fromtimestamp(exps[0] / 1000, IST).strftime("%Y-%m-%d")
+    _OPT["day"] = today
+    return _OPT["expiry"]
+
+
+def parse_option_chain(rows, spot=None):
+    """rows: Upstox option-chain data list. Returns a dict of near-the-money OI, PCR, walls and ATM IV, or None."""
+    recs = []
+    for x in rows or []:
+        k = x.get("strike_price")
+        c, p = x.get("call_options") or {}, x.get("put_options") or {}
+        cm, pm = c.get("market_data") or {}, p.get("market_data") or {}
+        if k is None:
+            continue
+        recs.append(dict(k=float(k), c_oi=float(cm.get("oi") or 0), p_oi=float(pm.get("oi") or 0),
+                         c_iv=(c.get("option_greeks") or {}).get("iv"), p_iv=(p.get("option_greeks") or {}).get("iv"),
+                         spot=x.get("underlying_spot_price")))
+    if not recs:
+        return None
+    t = pd.DataFrame(recs).sort_values("k").reset_index(drop=True)
+    sp = spot or next((v for v in t["spot"] if v), None)
+    if not sp:
+        return None
+    atm = int((t["k"] - sp).abs().idxmin())
+    near = t.iloc[max(0, atm - OPT_NEAR_STRIKES): atm + OPT_NEAR_STRIKES + 1]
+    c_near, p_near = near["c_oi"].sum(), near["p_oi"].sum()
+    above, below = t[t["k"] >= sp], t[t["k"] <= sp]
+    ivs = [v for v in (t.loc[atm, "c_iv"], t.loc[atm, "p_iv"]) if v]
+    return dict(spot=sp, atm=float(t.loc[atm, "k"]), c_near=c_near, p_near=p_near,
+                pcr_near=p_near / c_near if c_near else None,
+                pcr_all=t["p_oi"].sum() / t["c_oi"].sum() if t["c_oi"].sum() else None,
+                call_wall=float(above.loc[above["c_oi"].idxmax(), "k"]) if len(above) and above["c_oi"].max() > 0 else None,
+                put_wall=float(below.loc[below["p_oi"].idxmax(), "k"]) if len(below) and below["p_oi"].max() > 0 else None,
+                iv=sum(ivs) / len(ivs) if ivs else None)
+
+
+def log_option_csv(snap, now):
+    """Append one row per reading to option_YYYY-MM-DD.csv (header written once). Never raises."""
+    if not OPTION_CSV:
+        return
+    try:
+        first = _OPT["first"] or {}
+        def chg(a, b):
+            return round((a / b - 1) * 100, 2) if b else ""
+        row = {"Time": now.strftime("%Y-%m-%d %H:%M:%S"), "expiry": snap.get("expiry"), "spot": snap["spot"],
+               "atm": snap["atm"], "call_oi_near": snap["c_near"], "put_oi_near": snap["p_near"],
+               "pcr_near": round(snap["pcr_near"], 3) if snap["pcr_near"] is not None else "",
+               "pcr_all": round(snap["pcr_all"], 3) if snap["pcr_all"] is not None else "",
+               "call_wall": snap["call_wall"] or "", "put_wall": snap["put_wall"] or "",
+               "atm_iv": round(snap["iv"], 2) if snap["iv"] else "",
+               "call_oi_chg_pct": chg(snap["c_near"], first.get("c_near")),
+               "put_oi_chg_pct": chg(snap["p_near"], first.get("p_near"))}
+        path = os.path.join(OPTION_CSV_DIR, f"option_{now:%Y-%m-%d}.csv")
+        new = not os.path.exists(path)
+        pd.DataFrame([row]).to_csv(path, mode="a", header=new, index=False)
+    except Exception as e:
+        print(f"  Option CSV not saved: {e}")
+
+
+def option_snapshot(spot):
+    """Cached option-chain summary, refreshed every OPT_REFRESH_SEC. None if anything fails (never raises)."""
+    try:
+        now = datetime.now(IST)
+        if _OPT["snap"] and _OPT["t"] and (now - _OPT["t"]).total_seconds() < OPT_REFRESH_SEC:
+            return _OPT["snap"]
+        if _OPT.get("fail_t") and (now - _OPT["fail_t"]).total_seconds() < OPT_REFRESH_SEC:
+            return _OPT["snap"]      # a recent fetch failed: do not retry on every candle
+        _OPT["fail_t"] = now
+        exp = option_expiry()
+        token = os.environ.get("UPSTOX_ACCESS_TOKEN")
+        if not exp or not token:
+            return None
+        r = requests.get("https://api.upstox.com/v2/option/chain",
+                         params={"instrument_key": INDEX_KEY, "expiry_date": exp},
+                         headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, timeout=10)
+        r.raise_for_status()
+        snap = parse_option_chain(r.json().get("data"), spot)
+        if snap:
+            snap["expiry"] = exp
+            if _OPT["first"] is None or _OPT["first"].get("day") != now.date():
+                _OPT["first"] = dict(day=now.date(), c_near=snap["c_near"], p_near=snap["p_near"])
+            _OPT["snap"], _OPT["t"] = snap, now
+            _OPT["fail_t"] = None
+            log_option_csv(snap, now)
+        return snap
+    except Exception as e:     # option data is optional context: never break the scanner
+        print(f"  Option chain unavailable: {e}")
+        return None
+
+
+def option_note(price, signal=None) -> str:
+    """Options line(s) for a CALL/PUT alert, ending in a newline; empty if the option data is unavailable."""
+    if not OPTION_DATA:
+        return ""
+    o = option_snapshot(price)
+    if not o:
+        return ""
+    parts = []
+    if o["pcr_near"] is not None:
+        who = ("put writers dominating (support)" if o["pcr_near"] >= OPT_PCR_BULL
+               else "call writers dominating (resistance)" if o["pcr_near"] <= OPT_PCR_BEAR else "balanced")
+        parts.append(f"PCR near the money {o['pcr_near']:.2f}, {who}")
+    if o["call_wall"] or o["put_wall"]:
+        parts.append(f"Biggest OI: call {o['call_wall']:,.0f} (resistance), put {o['put_wall']:,.0f} (support)"
+                     if o["call_wall"] and o["put_wall"] else
+                     f"Biggest OI: {'call ' + format(o['call_wall'], ',.0f') if o['call_wall'] else 'put ' + format(o['put_wall'], ',.0f')}")
+    first = _OPT["first"]
+    flags = []
+    if first and first["c_near"] and first["p_near"]:
+        dc = (o["c_near"] / first["c_near"] - 1) * 100
+        dp = (o["p_near"] / first["p_near"] - 1) * 100
+        parts.append(f"Near-the-money OI since first reading today: calls {dc:+.0f}%, puts {dp:+.0f}%")
+        if dp - dc >= OPT_OI_SHIFT_PCT and signal == PUT:
+            flags.append("put OI is building faster than call OI (support) <- against a PUT")
+        if dc - dp >= OPT_OI_SHIFT_PCT and signal == CALL:
+            flags.append("call OI is building faster than put OI (resistance) <- against a CALL")
+    if signal == CALL and o["call_wall"] and 0 <= o["call_wall"] - price <= OPT_WALL_NEAR_PTS:
+        flags.append(f"price is only {o['call_wall'] - price:.0f} pts under the big call OI at {o['call_wall']:,.0f} <- against a CALL")
+    if signal == PUT and o["put_wall"] and 0 <= price - o["put_wall"] <= OPT_WALL_NEAR_PTS:
+        flags.append(f"price is only {price - o['put_wall']:.0f} pts over the big put OI at {o['put_wall']:,.0f} <- against a PUT")
+    if o["iv"]:
+        parts.append(f"ATM IV {o['iv']:.1f}")
+    return f"Options ({o['expiry']}): " + " | ".join(parts) + "\n" + "".join(f"  {f}\n" for f in flags)
 
 
 def rsi(close: pd.Series, n: int = 14) -> pd.Series:
@@ -417,6 +627,36 @@ def flow_stats(df, fut, window=None):
     return net, tot, net / tot * 100
 
 
+def combo_state(df, ind, back=0):
+    """Two-letter key: volume (U up, D down) then price (u up, f flat, d down) over the last COMBO_WINDOW candles
+    (ending `back` candles ago). None when volume is normal or there is not enough data."""
+    w = COMBO_WINDOW
+    end = len(df) - back
+    if end < w + 1 or "vol_x" not in ind or len(ind) < end:
+        return None
+    v = ind["vol_x"].iloc[end - w:end].mean()
+    c1, c0 = float(df["Close"].iloc[end - 1]), float(df["Close"].iloc[end - 1 - w])
+    if pd.isna(v) or c0 <= 0:
+        return None
+    vs = "U" if v >= COMBO_VOL_UP_X else "D" if v <= COMBO_VOL_DOWN_X else None
+    if vs is None:
+        return None
+    pct = (c1 - c0) / c0 * 100
+    return vs + ("u" if pct > COMBO_FLAT_PCT else "d" if pct < -COMBO_FLAT_PCT else "f")
+
+
+def combo_note(df, ind, signal=None) -> str:
+    """One line (ending in a newline) with the current volume + price combination; empty when volume is normal."""
+    k = combo_state(df, ind)
+    if not k:
+        return ""
+    name, meaning, bias = COMBOS[k]
+    line = f"{name}: {meaning}"
+    if (signal == CALL and bias < 0) or (signal == PUT and bias > 0):
+        line += "  <- against this signal"
+    return line + "\n"
+
+
 def flow_note(df, fut, signal=None) -> str:
     """One line (ending in a newline) with the recent net volume; empty if there is no futures volume.
     With a signal, it also says when the flow points the other way."""
@@ -491,7 +731,8 @@ def detect_fake(df, ind):
 def detect_pullback(df, ind):
     """PULLBACK: in a trend, a bounce against it fails (rejection candle)."""
     n, last, r = len(df), df.iloc[-1], ind.iloc[-1]
-    if n < 30 or (df.index[-1].hour, df.index[-1].minute) >= PULL_NO_ENTRY_AFTER:
+    hm = (df.index[-1].hour, df.index[-1].minute)
+    if n < 30 or hm >= PULL_NO_ENTRY_AFTER or (ACCURACY_MODE and hm < PULL_NO_ENTRY_BEFORE):
         return None
     win = df.iloc[-RANGE_WINDOW:]
     if (win["High"].max() - win["Low"].min()) / last.Close * 100 < PULL_MIN_RANGE_PCT:
@@ -623,9 +864,9 @@ def trend_events(df, fut):
 
 # Confidence labels use the 12-day replay (8-26 Oct 2026): win rate = 60-minute result in the signal's direction.
 KINDS = (("INDICATION", "SUMMARY only (3 of 10 won)"),
-         ("BREAKOUT", "HIGH confidence (10 of 13 won before 12:00)"),
+         ("BREAKOUT", "HIGH confidence (about 7 in 10 won, 28 seen in 27 days, chop-filtered)"),
          ("FAKE BREAKOUT", "LOWER confidence (only 5 seen, 2 won)"),
-         ("PULLBACK", "LOWER confidence (59 seen, 58% won)"),
+         ("PULLBACK", "MEDIUM confidence (about 7 in 10 won, 10:00-14:30, chop-filtered)"),
          ("TREND REVERSE", "SUMMARY only (33 seen, 36% won, -286 pts)"),
          ("OPENING BREAK", "MEDIUM confidence (7 of 10 won with the stop)"),
          ("SWING", "MEDIUM confidence (89 seen, about 44% won, +1,121 pts held to the next swing; late by design)"))
@@ -667,8 +908,8 @@ def choppy(ind):
 
 def accuracy_ok(df, ind, s, st) -> bool:
     """v8.3: opposite-direction flips within FLIP_COOLDOWN_MIN are blocked, and chop blocks CHOP_KINDS."""
-    if not ACCURACY_MODE or s["kind"] not in LIVE_KINDS or s["kind"] == "BREAKOUT":
-        return True   # a volume BREAKOUT is never blocked here
+    if not ACCURACY_MODE or s["kind"] not in LIVE_KINDS:
+        return True
     if (st.last_dir is not None and s["signal"] != st.last_dir
             and (df.index[-1] - st.last_dir_t).total_seconds() < FLIP_COOLDOWN_MIN * 60):
         return False
@@ -868,6 +1109,8 @@ class State:
         self.ob = None          # {"d", "entry", "stop", "time"} while an opening break idea is open
         self.swing = None       # same shape, while a swing idea is open (v8)
         self.last_dir, self.last_dir_t = None, None   # v8.3: direction and candle time of the last live alert
+        self.combo_last, self.combo_sent_t = None, None   # v8.7
+        self.last_vol_alert = None   # v8.6: candle time of the last volume alert
 
     def allow(self, kind, key, now) -> bool:
         if key == self.last_key.get(kind):
@@ -927,9 +1170,48 @@ def process_candle(df, fut, now, st: State) -> list:
             msgs.append(f"TREND {'UP' if up else 'DOWN'} (held {TREND_HOLD_MIN} min)\n"
                         f"Nifty {price:,.2f} at {ts} IST\n"
                         f"{flow_note(df, fut)}"
+                        f"{combo_note(df, ind, td) if COMBO_IN_ALERTS else ''}"
                         f"The weak-trend score has pointed {'up' if up else 'down'} for {TREND_HOLD_MIN} minutes in a row.\n"
                         f"Bias: favour {'CALL' if up else 'PUT'} setups and be careful with the opposite side.\n"
                         f"Context only, not an entry. Choppy days flip it often.\n\nNot financial advice.")
+    # --- VOLUME + PRICE combination changed and held (v8.7)
+    if COMBO_ALERT:
+        keys = [combo_state(df, ind, back=b) for b in range(COMBO_HOLD)]
+        k = keys[0]
+        t_now = df.index[-1]
+        if (k and k[0] + k[1].upper() in COMBO_SEND and all(x == k for x in keys) and k != st.combo_last
+                and (st.combo_sent_t is None or (t_now - st.combo_sent_t).total_seconds() >= COMBO_GAP_MIN * 60)
+                and n >= VOL_ALERT_MIN_CANDLES):
+            st.combo_last, st.combo_sent_t = k, t_now
+            name, meaning, bias = COMBOS[k]
+            move = float(df["Close"].iloc[-1] - df["Close"].iloc[-1 - COMBO_WINDOW])
+            msgs.append(f"VOLUME + PRICE: {name}\n"
+                        f"Nifty {price:,.2f} at {ts} IST, {move:+.1f} pts in {COMBO_WINDOW} candles\n"
+                        f"{meaning[0].upper() + meaning[1:]}.\n"
+                        f"{flow_note(df, fut)}"
+                        "Information only, not a CALL/PUT signal. Wait for a signal alert before acting.\n\n"
+                        "Not financial advice.")
+    # --- VOLUME SPIKE: information only, sent whenever futures volume jumps (v8.6)
+    if VOLUME_ALERT and n >= VOL_ALERT_MIN_CANDLES and len(ind) and pd.notna(ind["vol_x"].iloc[-1]) \
+            and ind["vol_x"].iloc[-1] >= VOL_ALERT_X:
+        t_now = df.index[-1]
+        if st.last_vol_alert is None or (t_now - st.last_vol_alert).total_seconds() >= VOL_ALERT_COOLDOWN_MIN * 60:
+            st.last_vol_alert = t_now
+            vx = float(ind["vol_x"].iloc[-1])
+            move = float(df["Close"].iloc[-1] - df["Open"].iloc[-1])
+            word = "BUYING (up candle)" if move > 0 else "SELLING (down candle)" if move < 0 else "no direction (flat candle)"
+            fv = float(fut["Volume"][fut.index <= t_now].iloc[-1]) if fut is not None and len(fut) else 0.0
+            rs = ind["rsi"].iloc[-1]
+            extreme = (" RSI is stretched, so this could be exhaustion, not a fresh move."
+                       if pd.notna(rs) and (rs <= FLOW_RSI_LOW or rs >= FLOW_RSI_HIGH) else "")
+            msgs.append(f"VOLUME SPIKE: {word}\n"
+                        f"Nifty {price:,.2f} at {ts} IST, candle {move:+.1f} pts\n"
+                        f"Futures volume {fv / 1000:,.0f}k = {vx:.1f}x the 20-candle average\n"
+                        f"{flow_note(df, fut)}"
+                        f"{combo_note(df, ind) if COMBO_IN_ALERTS else ''}"
+                        f"RSI {rs:.0f}.{extreme}\n"
+                        "Information only, not a CALL/PUT signal. Wait for a signal alert before acting.\n\n"
+                        "Not financial advice.")
     fired = False
     send = [s for s in sigs
             if time_ok(df, s["kind"]) and aligned_ok(df, s["kind"], s["signal"])
@@ -961,7 +1243,8 @@ def process_candle(df, fut, now, st: State) -> list:
             head = (" + ".join(s["kind"] for s in grp) + f": {signal}\n"
                     + " | ".join(f"{s['kind']}: {conf[s['kind']]}" for s in grp) + "\n")
             body = "\n".join(f"[{s['kind']}] " + " / ".join(x.lstrip("✓•✗ ") for x in s["why"][:3]) for s in grp)
-        msgs.append(f"{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{flow_note(df, fut, signal)}{body}\n"
+        msgs.append(f"{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{flow_note(df, fut, signal)}"
+                    f"{combo_note(df, ind, signal) if COMBO_IN_ALERTS else ''}{option_note(price, signal)}{body}\n"
                     "\nNot financial advice. Use your own stop-loss.")
     if fired:
         st.watch = None
@@ -1123,7 +1406,7 @@ def sync_futures(df, fut, fut_key, retries=3, wait=5):
 
 
 def main():
-    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v8.3).\n")
+    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v8.4).\n")
     fut_key, fut_name = None, None
     try:
         fut_key, fut_name = get_future_key()
@@ -1135,7 +1418,7 @@ def main():
     if relay_run:
         send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
     else:
-        send_telegram(f"Nifty scanner v8.3 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
+        send_telegram(f"Nifty scanner v8.9 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
                       + f"No BREAKOUT after {BREAKOUT_LAST[0]}:{BREAKOUT_LAST[1]:02d}, nothing new after "
@@ -1198,6 +1481,8 @@ def main():
                     obs_count += 1
                     if OBSERVE_TELEGRAM_EVERY and obs_count % OBSERVE_TELEGRAM_EVERY == 0:
                         send_telegram(obs, silent=True)
+                    if (OPTION_DATA or OPTION_CSV) and len(df):
+                        option_snapshot(float(df["Close"].iloc[-1]))   # keeps the option CSV filled every 5 minutes
                     if len(df) >= IND_MIN_CANDLES:
                         for m in process_candle(df, fut, now, st):
                             print(m.replace("\n", " | "))
