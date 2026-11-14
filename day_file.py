@@ -14,16 +14,29 @@ CSV columns (one row per minute):
   indication, strong (BREAKOUT), fake, pullback, reverse, opening_break, swing = CALL/PUT on every minute the condition was true.
   weak_trend = a rough trend score (never sent as an alert; it is ON for most of a trend day)
   (raw, before the 15-minute cooldown, so you will see runs of the same signal)
+
+OPEN INTEREST columns (added at the end, blank if Upstox has no OI for that minute):
+  fut_oi, fut_oi_chg15 (change in futures OI over 15 minutes), oi_buildup = price move + OI move over 15 minutes:
+      LONG BUILDUP (price up, OI up) | SHORT BUILDUP (price down, OI up) | SHORT COVERING (price up, OI down) | LONG UNWINDING (price down, OI down)
+  opt_expiry, call_oi_near / put_oi_near (OI of the CE / PE strikes within OPT_NEAR_STRIKES of the money, per minute),
+  pcr_near (put OI / call OI), call_oi_chg_pct / put_oi_chg_pct (change since 09:15), call_wall / put_wall
+  (strike above / below the price with the most CE / PE OI).
+  The option OI comes from each option's own 1-minute candles, so it is a real per-minute history, not a snapshot.
+  IV is not in candles, so it is not here. If the day's option contracts are no longer listed, the option columns are blank.
 """
+import gzip
+import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+import numpy as np
 import pandas as pd
 import requests
 
-from nifty_scanner_upstox import (CALL, IST, INDEX_KEY, OPENING_RANGE_MIN, PUT, WAIT, TG_CHAT_ID,
+from nifty_scanner_upstox import (CALL, IST, INDEX_KEY, INSTR_URL, OPENING_RANGE_MIN, PUT, WAIT, TG_CHAT_ID,
                                   TG_TOKEN, IND_MIN_CANDLES, early_signal, fetch_candles, get_future_key, rsi,
                                   scan_candle, send_telegram)
 
@@ -214,6 +227,117 @@ def send_day_video(table, day, note=""):
         print(f"Day video failed: {e}")
 
 
+OPT_NEAR_STRIKES = 6      # strikes each side of the money used for near-the-money OI and PCR
+OPT_STRIKE_STEP = 50
+OPT_MARGIN = 100          # fetch strikes this many points beyond the day's low and high
+OPT_MAX_STRIKES = 24      # cap on strikes fetched (each strike = a CE and a PE request)
+
+
+def fetch_oi_series(key: str, day: str) -> pd.Series:
+    """Open interest per minute (the 7th value of each 1-minute candle) for one instrument and day."""
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {os.environ['UPSTOX_ACCESS_TOKEN']}"}
+    if day == datetime.now(IST).strftime("%Y-%m-%d"):
+        urls = [f"https://api.upstox.com/v3/historical-candle/intraday/{quote(key, safe='')}/minutes/1"]
+    else:
+        nxt = (datetime.strptime(day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        urls = [f"https://api.upstox.com/v3/historical-candle/{quote(key, safe='')}/minutes/1/{d}/{day}" for d in (day, nxt)]
+    for url in urls:
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        candles = r.json().get("data", {}).get("candles", [])
+        if candles and len(candles[0]) >= 7:
+            x = pd.DataFrame(candles).iloc[:, [0, 6]]
+            x.columns = ["Time", "oi"]
+            x["Time"] = pd.to_datetime(x["Time"])
+            x = x.sort_values("Time").set_index("Time")["oi"].astype(float)
+            x = x[x.index.strftime("%Y-%m-%d") == day]
+            if len(x):
+                return x[~x.index.duplicated(keep="last")]
+    return pd.Series(dtype=float)
+
+
+def load_option_contracts(day: str) -> pd.DataFrame:
+    """NIFTY CE/PE contracts of the nearest expiry on or after `day` (strike, type, instrument_key, expiry)."""
+    r = requests.get(INSTR_URL, timeout=60)
+    r.raise_for_status()
+    data = json.loads(gzip.decompress(r.content))
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=IST).timestamp() * 1000
+    opts = [i for i in data if i.get("segment") == "NSE_FO" and i.get("instrument_type") in ("CE", "PE")
+            and i.get("underlying_symbol") == "NIFTY" and i.get("expiry", 0) >= start]
+    if not opts:
+        return pd.DataFrame()
+    exp = min(i["expiry"] for i in opts)
+    rows = [dict(strike=float(i["strike_price"]), kind=i["instrument_type"], key=i["instrument_key"], expiry=exp)
+            for i in opts if i["expiry"] == exp]
+    return pd.DataFrame(rows)
+
+
+def add_futures_oi(t: pd.DataFrame, fut_key, day: str) -> pd.DataFrame:
+    """fut_oi, fut_oi_chg15 and the 15-minute price + OI buildup label."""
+    oi = fetch_oi_series(fut_key, day).reindex(t.index).ffill()
+    t["fut_oi"] = oi
+    t["fut_oi_chg15"] = oi - oi.shift(15)
+    px = (t["fut_close"] if "fut_close" in t else t["close"]).astype(float)
+    dp = px - px.shift(15)
+    lab = np.where(dp.isna() | t["fut_oi_chg15"].isna(), "",
+                   np.where(dp > 0, np.where(t["fut_oi_chg15"] > 0, "LONG BUILDUP", "SHORT COVERING"),
+                            np.where(dp < 0, np.where(t["fut_oi_chg15"] > 0, "SHORT BUILDUP", "LONG UNWINDING"), "")))
+    t["oi_buildup"] = lab
+    return t
+
+
+def add_option_oi(t: pd.DataFrame, day: str, contracts: pd.DataFrame = None, fetch=fetch_oi_series) -> pd.DataFrame:
+    """Per-minute near-the-money call/put OI, PCR, OI change and the biggest-OI strikes, from each option's own candles."""
+    if contracts is None:
+        contracts = load_option_contracts(day)
+    if contracts is None or contracts.empty:
+        return t
+    step = OPT_STRIKE_STEP
+    lo = int((t["low"].min() - OPT_MARGIN) // step * step)
+    hi = int(-(-(t["high"].max() + OPT_MARGIN) // step) * step)
+    strikes = [k for k in range(lo, hi + step, step)]
+    if len(strikes) > OPT_MAX_STRIKES:                        # keep the strikes closest to the day's open
+        mid = t["open"].iloc[0]
+        strikes = sorted(sorted(strikes, key=lambda k: abs(k - mid))[:OPT_MAX_STRIKES])
+    grid = {"CE": {}, "PE": {}}
+    for k in strikes:
+        for kind in ("CE", "PE"):
+            row = contracts[(contracts["strike"] == k) & (contracts["kind"] == kind)]
+            if row.empty:
+                continue
+            try:
+                s_ = fetch(row.iloc[0]["key"], day).reindex(t.index).ffill()
+            except Exception as e:
+                print(f"  OI fetch failed for {kind} {k}: {e}")
+                continue
+            if s_.notna().any():
+                grid[kind][k] = s_
+            time.sleep(0.12)                                    # stay well under the API rate limit
+    ce, pe = pd.DataFrame(grid["CE"]), pd.DataFrame(grid["PE"])
+    if ce.empty or pe.empty:
+        return t
+    close = t["close"].values
+    atm = (np.round(close / step) * step)
+    c_near, p_near, c_wall, p_wall = [], [], [], []
+    for i in range(len(t)):
+        near_c = [k for k in ce.columns if abs(k - atm[i]) <= OPT_NEAR_STRIKES * step]
+        near_p = [k for k in pe.columns if abs(k - atm[i]) <= OPT_NEAR_STRIKES * step]
+        c_near.append(ce.iloc[i][near_c].sum(min_count=1) if near_c else np.nan)
+        p_near.append(pe.iloc[i][near_p].sum(min_count=1) if near_p else np.nan)
+        up = [k for k in ce.columns if k >= close[i]]
+        dn = [k for k in pe.columns if k <= close[i]]
+        c_wall.append(ce.iloc[i][up].idxmax() if up and ce.iloc[i][up].notna().any() else np.nan)
+        p_wall.append(pe.iloc[i][dn].idxmax() if dn and pe.iloc[i][dn].notna().any() else np.nan)
+    t["opt_expiry"] = datetime.fromtimestamp(contracts["expiry"].iloc[0] / 1000, IST).strftime("%Y-%m-%d")
+    t["call_oi_near"], t["put_oi_near"] = c_near, p_near
+    t["pcr_near"] = t["put_oi_near"] / t["call_oi_near"].replace(0, np.nan)
+    for col, new in (("call_oi_near", "call_oi_chg_pct"), ("put_oi_near", "put_oi_chg_pct")):
+        first = t[col].dropna()
+        t[new] = (t[col] / first.iloc[0] - 1) * 100 if len(first) and first.iloc[0] else np.nan
+    t["call_wall"], t["put_wall"] = c_wall, p_wall
+    return t
+
+
 def fetch_day(key: str, day: str) -> pd.DataFrame:
     """1-minute candles for one date. Today comes from the intraday endpoint; earlier days
     come from the V3 historical endpoint (which only serves finished days)."""
@@ -325,7 +449,7 @@ def main():
     if df.empty:
         send_telegram(f"No Nifty candles found for {day}. Check the date (trading day, within the last ~month).")
         raise SystemExit("No data.")
-    fut = None
+    fut, key = None, None
     try:
         fk = get_future_key()                   # v7.1 returns 3 values, v8 returns 2: take the first two either way
         key, name = fk[0], fk[1]
@@ -334,9 +458,22 @@ def main():
     except Exception as e:
         fut_note = f"futures lookup failed ({e})"
     t = build_table(df, fut)
+    oi_note = ""
+    try:                                                        # open interest is extra: never block the CSV
+        if key:
+            t = add_futures_oi(t, key, day)
+            oi_note += ", futures OI added"
+    except Exception as e:
+        oi_note += f", futures OI failed ({e})"
+    try:
+        had = "pcr_near" in t
+        t = add_option_oi(t, day)
+        oi_note += ", option OI + PCR added" if "pcr_near" in t and not had else ", option OI not found"
+    except Exception as e:
+        oi_note += f", option OI failed ({e})"
     path = f"nifty_{day}.csv"
-    t.to_csv(path)
-    send_document(path, f"Nifty 1-minute data {day} ({len(t)} rows, {fut_note})")
+    t.round(3).to_csv(path)
+    send_document(path, f"Nifty 1-minute data {day} ({len(t)} rows, {fut_note}{oi_note})")
     if a and b:
         parts = window_texts(t, a, b)
         for n_, part in enumerate(parts, 1):
