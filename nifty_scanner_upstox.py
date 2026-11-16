@@ -1,6 +1,28 @@
 """
-Nifty 50 multi-signal scanner v8.9 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v9.1 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
+
+v9.1 change: replay of 28 days (1 Oct - 16 Nov 2026, +30 before -30 within 60 min, same-code replay):
+  live set (OPENING BREAK 60% on 10, BREAKOUT 67% on 27, PULLBACK 70% on 46) = 67% on 83 decided alerts (95% range 57-78%).
+  - CONTEXT_GATE is now OFF. In the replay only 2 of 89 alerts had 2+ readings against, so it changed nothing, and alerts with
+    flow against them won 81% (17) vs 64% with flow for: no sign that flow, combos or the old A/B/C grade predict anything.
+    The grade was removed from the summary for that reason (grade A won 63%, no context 71%).
+  - the SUMMARY now carries the OPTION PARAMETERS (PCR, biggest call/put OI strikes, OI change today, ATM IV) and the FUTURES OI
+    read (long/short buildup, covering, unwinding over 15 candles). Option and OI data exist for one day only (16 Nov, no live-kind
+    alert that day), so these are information, never a filter.
+  - nothing else was changed: time-of-day and direction splits of the 83 alerts were noise, not worth fitting to.
+
+v9.0 change: ACCURACY + TELEGRAM SUMMARY.
+  - every CALL/PUT alert now opens with a 4-line SUMMARY (direction, entry, stop, target, context for/against, grade A/B/C)
+    so the decision fits on one phone screen; the detail lines follow below it
+  - CONTEXT GATE: a live alert is dropped when CONTEXT_MAX_AGAINST (2) or more independent context readings (net volume flow,
+    volume+price combination, option chain) point against it. Flow, combos and options were never validated as filters, so
+    two-against is a deliberately high bar. Set CONTEXT_GATE = False to turn it off. Replay/summary does not apply it.
+  - PULLBACK back to 10:00-14:30 only (the v8.4 replay: 45% before 10:00, 40% after 14:00; v8.5 removed it by accident)
+  - STALE FEED GUARD: no live alert if the newest candle is more than STALE_MAX_MIN (4) minutes old
+  - stop / target idea: OPENING BREAK and SWING keep their own stop; BREAKOUT and PULLBACK use +/-ALERT_RISK_PTS (30), the same
+    +30/-30 test the win rates above were measured with
+  - Telegram messages longer than 4,000 characters (the end-of-day summary can be) are split instead of rejected
 
 v8.9 change: every option reading is saved to option_YYYY-MM-DD.csv (OPTION_CSV, every 5 minutes, one file a day) with
 time, expiry, spot, ATM strike, near-the-money call/put OI, PCR (near and whole chain), biggest call/put OI strikes,
@@ -149,6 +171,13 @@ COMBOS = {
     "Dd": ("Volume DOWN + price DOWN", "weak fall, few sellers behind it, may pause or bounce", 0),
 }
 
+# ---- v9.0 summary + context gate + guards ----
+ALERT_SUMMARY = True         # 4-line summary at the top of every CALL/PUT alert
+ALERT_RISK_PTS = 30          # stop and target distance for BREAKOUT / PULLBACK (matches the +30/-30 replay test)
+CONTEXT_GATE = False         # drop a live alert when enough context readings point against it
+CONTEXT_MAX_AGAINST = 2      # this many "against" readings (flow, combo, options) = dropped
+STALE_MAX_MIN = 4            # live alerts need a candle no older than this many minutes
+
 # ---- v8.8 OPTION CHAIN context: OI, PCR, IV (information only, never blocks or creates a signal) ----
 OPTION_DATA = True           # add an options line to CALL/PUT alerts (silently skipped if the option data cannot be fetched)
 OPTION_CSV = True            # v8.9: save every option reading to option_YYYY-MM-DD.csv (for backtesting OI / PCR later)
@@ -187,8 +216,8 @@ FAKE_WINDOW = 8
 FAKE_VOL_RATIO = 1.5
 FAKE_MARGIN_PCT = 0.05
 PULL_BOUNCE_WINDOW = 6
-PULL_NO_ENTRY_AFTER = (15, 30)
-PULL_NO_ENTRY_BEFORE = (9, 15)   # no pullback time limit
+PULL_NO_ENTRY_AFTER = (14, 30)
+PULL_NO_ENTRY_BEFORE = (10, 0)    # v9.0: pullbacks only 10:00-14:30
 PULL_MIN_RANGE_PCT = 0.20
 REV_CROSS_WINDOW = 10
 REV_VWAP_WINDOW = 15
@@ -209,7 +238,7 @@ MAX_RUN_MIN = float(os.environ.get("SCAN_MAX_MINUTES", "0") or 0)   # 0 = never 
 # ---- What is sent live vs only counted in the end-of-day summary ----
 # ---- v8.3 ACCURACY MODE: fewer, stricter alerts (False = v8.2 behaviour) ----
 ACCURACY_MODE = True
-LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK") if ACCURACY_MODE
+LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK","SWING") if ACCURACY_MODE
               else ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING"))
 OB_MAX_RISK_PTS = 60         # skip OPENING BREAK if the stop (range middle) is further than this from the entry
 FLIP_COOLDOWN_MIN = 30       # no live alert in the opposite direction within this many minutes of the last live alert
@@ -238,16 +267,24 @@ def send_telegram(text: str, silent: bool = False) -> None:
     if not (TG_TOKEN and TG_CHAT_ID):
         print("  (Telegram not configured, skipping alert)")
         return
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT_ID, "text": text, "disable_notification": silent},
-            timeout=10,
-        )
-        if not r.ok:
-            print(f"  Telegram error {r.status_code}: {r.text}")
-    except requests.RequestException as e:
-        print(f"  Telegram send failed: {e}")
+    chunks, cur = [], ""
+    for line in text.split("\n"):             # Telegram rejects messages over 4096 characters
+        if len(cur) + len(line) + 1 > 4000 and cur:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    chunks.append(cur.rstrip("\n"))
+    for ch in chunks:
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                json={"chat_id": TG_CHAT_ID, "text": ch, "disable_notification": silent},
+                timeout=10,
+            )
+            if not r.ok:
+                print(f"  Telegram error {r.status_code}: {r.text}")
+        except requests.RequestException as e:
+            print(f"  Telegram send failed: {e}")
 
 
 def fetch_candles(key: str) -> pd.DataFrame:
@@ -268,8 +305,11 @@ def fetch_candles(key: str) -> pd.DataFrame:
     if not candles:  # no candles yet (before the first one, or no trading today)
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"],
                             index=pd.DatetimeIndex([], tz=IST))
-    df = pd.DataFrame(candles).iloc[:, :6]
+    raw = pd.DataFrame(candles)
+    df = raw.iloc[:, :6].copy()
     df.columns = ["Time", "Open", "High", "Low", "Close", "Volume"]
+    if raw.shape[1] > 6:
+        df["OI"] = pd.to_numeric(raw.iloc[:, 6], errors="coerce")   # v9.1: futures open interest
     df["Time"] = pd.to_datetime(df["Time"])
     df = df.sort_values("Time").set_index("Time")
     now_min = datetime.now(IST).replace(second=0, microsecond=0)
@@ -433,6 +473,113 @@ def option_note(price, signal=None) -> str:
     if o["iv"]:
         parts.append(f"ATM IV {o['iv']:.1f}")
     return f"Options ({o['expiry']}): " + " | ".join(parts) + "\n" + "".join(f"  {f}\n" for f in flags)
+
+
+def context_votes(df, fut, ind, signal, price):
+    """v9.0: independent context readings for a CALL/PUT. Returns (for_list, against_list) of short labels."""
+    d = 1 if signal == CALL else -1
+    pro, con = [], []
+    fs = flow_stats(df, fut)
+    if fs is not None:
+        pct = fs[2]
+        if d * pct >= FLOW_DOM_PCT:
+            pro.append("flow")
+        elif d * pct <= -FLOW_DOM_PCT:
+            con.append("flow")
+    k = combo_state(df, ind)
+    if k:
+        bias = COMBOS[k][2]
+        if bias * d > 0:
+            pro.append("vol+price")
+        elif bias * d < 0:
+            con.append("vol+price")
+    if OPTION_DATA:
+        o = option_snapshot(price)
+        if o:
+            opt_for = opt_against = False
+            if o.get("pcr_near") is not None:
+                opt_for = (d > 0 and o["pcr_near"] >= OPT_PCR_BULL) or (d < 0 and o["pcr_near"] <= OPT_PCR_BEAR)
+                opt_against = (d > 0 and o["pcr_near"] <= OPT_PCR_BEAR) or (d < 0 and o["pcr_near"] >= OPT_PCR_BULL)
+            cw, pw = o.get("call_wall"), o.get("put_wall")
+            if d > 0 and cw and 0 <= cw - price <= OPT_WALL_NEAR_PTS:
+                opt_against = True
+            if d < 0 and pw and 0 <= price - pw <= OPT_WALL_NEAR_PTS:
+                opt_against = True
+            if opt_against:
+                con.append("options")
+            elif opt_for:
+                pro.append("options")
+    return pro, con
+
+
+def context_ok(df, fut, ind, signal, price) -> bool:
+    """False when CONTEXT_MAX_AGAINST or more readings point against the signal."""
+    if not CONTEXT_GATE:
+        return True
+    return len(context_votes(df, fut, ind, signal, price)[1]) < CONTEXT_MAX_AGAINST
+
+
+OI_WINDOW = 15               # candles used for the futures OI buildup read
+
+
+def oi_buildup(df, fut):
+    """v9.1: futures OI read over OI_WINDOW candles: price and OI up = LONG BUILDUP, price down and OI up = SHORT BUILDUP,
+    price up and OI down = SHORT COVERING, both down = LONG UNWINDING. None when there is no OI."""
+    if fut is None or "OI" not in fut or not len(df):
+        return None
+    f = fut[fut.index <= df.index[-1]]
+    f = f[["Close", "OI"]].dropna()
+    if len(f) <= OI_WINDOW:
+        return None
+    dp = float(f["Close"].iloc[-1] - f["Close"].iloc[-1 - OI_WINDOW])
+    do = float(f["OI"].iloc[-1] - f["OI"].iloc[-1 - OI_WINDOW])
+    if dp == 0 or do == 0:
+        return None
+    name = ("LONG BUILDUP" if dp > 0 and do > 0 else "SHORT BUILDUP" if dp < 0 < do
+            else "SHORT COVERING" if dp > 0 > do else "LONG UNWINDING")
+    return name, do
+
+
+def option_line(price) -> str:
+    """One compact line of option parameters for the summary; empty when option data is unavailable."""
+    if not OPTION_DATA:
+        return ""
+    o = option_snapshot(price)
+    if not o:
+        return ""
+    bits = []
+    if o.get("pcr_near") is not None:
+        bits.append(f"PCR {o['pcr_near']:.2f}")
+    if o.get("call_wall"):
+        bits.append(f"call wall {o['call_wall']:,.0f}")
+    if o.get("put_wall"):
+        bits.append(f"put wall {o['put_wall']:,.0f}")
+    first = _OPT.get("first")
+    if first and first.get("c_near") and first.get("p_near") and o.get("c_near") and o.get("p_near"):
+        bits.append(f"OI today calls {(o['c_near'] / first['c_near'] - 1) * 100:+.0f}% puts {(o['p_near'] / first['p_near'] - 1) * 100:+.0f}%")
+    if o.get("iv"):
+        bits.append(f"IV {o['iv']:.1f}")
+    return ("Options: " + " | ".join(bits) + "\n") if bits else ""
+
+
+def alert_summary(df, fut, ind, signal, grp, price, ts) -> str:
+    """v9.1: the short summary at the top of a CALL/PUT alert: levels, context for/against, option parameters, futures OI."""
+    d = 1 if signal == CALL else -1
+    own = next((s for s in grp if "stop" in s and "entry" in s), None)
+    entry = float(own["entry"]) if own else float(price)
+    stop = float(own["stop"]) if own else entry - d * ALERT_RISK_PTS
+    risk = abs(entry - stop)
+    target = entry + d * risk
+    pro, con = context_votes(df, fut, ind, signal, price)
+    kinds = " + ".join(s["kind"] for s in grp)
+    out = (f"SUMMARY: {'CALL' if d > 0 else 'PUT'} ({'UP' if d > 0 else 'DOWN'}) - {kinds}\n"
+           f"Entry {entry:,.1f} | Stop {stop:,.1f} | Target {target:,.1f} ({risk:.0f} pts risk)\n"
+           f"Context (info only): for {', '.join(pro) if pro else 'none'} | against {', '.join(con) if con else 'none'}\n")
+    out += option_line(price)
+    ob = oi_buildup(df, fut)
+    if ob:
+        out += f"Futures OI {OI_WINDOW}m: {ob[0]} ({ob[1] / 1000:+,.0f}k)\n"
+    return out + f"Time {ts} IST\n---\n"
 
 
 def rsi(close: pd.Series, n: int = 14) -> pd.Series:
@@ -1213,9 +1360,13 @@ def process_candle(df, fut, now, st: State) -> list:
                         "Information only, not a CALL/PUT signal. Wait for a signal alert before acting.\n\n"
                         "Not financial advice.")
     fired = False
+    stale = (now - df.index[-1].to_pydatetime()).total_seconds() / 60 > STALE_MAX_MIN   # v9.0 stale-feed guard
+    if stale:
+        print(f"  Newest candle {ts} is more than {STALE_MAX_MIN} min old: live alerts held back.")
     send = [s for s in sigs
-            if time_ok(df, s["kind"]) and aligned_ok(df, s["kind"], s["signal"])
+            if not stale and time_ok(df, s["kind"]) and aligned_ok(df, s["kind"], s["signal"])
             and s["kind"] in LIVE_KINDS and accuracy_ok(df, ind, s, st)
+            and context_ok(df, fut, ind, s["signal"], float(price))
             and st.allow(s["kind"], s["key"], now)]
     groups = {}
     for s in send:
@@ -1243,7 +1394,8 @@ def process_candle(df, fut, now, st: State) -> list:
             head = (" + ".join(s["kind"] for s in grp) + f": {signal}\n"
                     + " | ".join(f"{s['kind']}: {conf[s['kind']]}" for s in grp) + "\n")
             body = "\n".join(f"[{s['kind']}] " + " / ".join(x.lstrip("✓•✗ ") for x in s["why"][:3]) for s in grp)
-        msgs.append(f"{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{flow_note(df, fut, signal)}"
+        top = alert_summary(df, fut, ind, signal, grp, price, ts) if ALERT_SUMMARY else ""
+        msgs.append(f"{top}{head}{upd}{note}Nifty {price:,.2f} at {ts} IST\n{flow_note(df, fut, signal)}"
                     f"{combo_note(df, ind, signal) if COMBO_IN_ALERTS else ''}{option_note(price, signal)}{body}\n"
                     "\nNot financial advice. Use your own stop-loss.")
     if fired:
@@ -1406,7 +1558,7 @@ def sync_futures(df, fut, fut_key, retries=3, wait=5):
 
 
 def main():
-    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v8.4).\n")
+    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v9.1).\n")
     fut_key, fut_name = None, None
     try:
         fut_key, fut_name = get_future_key()
@@ -1418,7 +1570,7 @@ def main():
     if relay_run:
         send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
     else:
-        send_telegram(f"Nifty scanner v8.9 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
+        send_telegram(f"Nifty scanner v9.1 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
                       + f"No BREAKOUT after {BREAKOUT_LAST[0]}:{BREAKOUT_LAST[1]:02d}, nothing new after "
