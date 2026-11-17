@@ -1,5 +1,5 @@
 """
-Nifty 50 multi-signal scanner v9.1 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v9.2 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
 
 v9.1 change: replay of 28 days (1 Oct - 16 Nov 2026, +30 before -30 within 60 min, same-code replay):
@@ -238,7 +238,7 @@ MAX_RUN_MIN = float(os.environ.get("SCAN_MAX_MINUTES", "0") or 0)   # 0 = never 
 # ---- What is sent live vs only counted in the end-of-day summary ----
 # ---- v8.3 ACCURACY MODE: fewer, stricter alerts (False = v8.2 behaviour) ----
 ACCURACY_MODE = True
-LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK","SWING") if ACCURACY_MODE
+LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK", "SWING") if ACCURACY_MODE
               else ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING"))
 OB_MAX_RISK_PTS = 60         # skip OPENING BREAK if the stop (range middle) is further than this from the entry
 FLIP_COOLDOWN_MIN = 30       # no live alert in the opposite direction within this many minutes of the last live alert
