@@ -1,6 +1,12 @@
 """
-Nifty 50 multi-signal scanner v9.2 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v9.3 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
+
+v9.3 change: FORWARD-TEST LOG (no signal rule changed). Every live CALL/PUT alert is appended to that day's own file
+alerts/alerts_YYYY-MM-DD.csv by alert_logger.py (the same CSV is also sent to Telegram after the close) (entry, stop, target, context, seconds after the candle closed). After 15:30 the outcomes are filled in
+(+30/-30 in 60 min, the alert's own stop/1R, and the same test with a 1- and 2-candle late entry) and a FORWARD TEST
+summary is added to the end-of-day Telegram message. If alert_logger.py is missing the scanner runs as before.
+Also: version labels in the startup message fixed.
 
 v9.1 change: replay of 28 days (1 Oct - 16 Nov 2026, +30 before -30 within 60 min, same-code replay):
   live set (OPENING BREAK 60% on 10, BREAKOUT 67% on 27, PULLBACK 70% on 46) = 67% on 83 decided alerts (95% range 57-78%).
@@ -122,6 +128,11 @@ from urllib.parse import quote
 import numpy as np
 import pandas as pd
 import requests
+
+try:
+    import alert_logger          # v9.3 forward-test log; optional
+except ImportError:
+    alert_logger = None
 
 INDEX_KEY = "NSE_INDEX|Nifty 50"
 INSTR_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
@@ -285,6 +296,24 @@ def send_telegram(text: str, silent: bool = False) -> None:
                 print(f"  Telegram error {r.status_code}: {r.text}")
         except requests.RequestException as e:
             print(f"  Telegram send failed: {e}")
+
+
+def send_telegram_file(path: str, caption: str = "") -> None:
+    """v9.3: send a file (the day's alerts CSV) to the same Telegram chat."""
+    if not (TG_TOKEN and TG_CHAT_ID) or not os.path.exists(path):
+        return
+    try:
+        with open(path, "rb") as fh:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendDocument",
+                data={"chat_id": TG_CHAT_ID, "caption": caption[:1000]},
+                files={"document": (os.path.basename(path), fh, "text/csv")},
+                timeout=30,
+            )
+        if not r.ok:
+            print(f"  Telegram file error {r.status_code}: {r.text}")
+    except (requests.RequestException, OSError) as e:
+        print(f"  Telegram file send failed: {e}")
 
 
 def fetch_candles(key: str) -> pd.DataFrame:
@@ -1374,6 +1403,13 @@ def process_candle(df, fut, now, st: State) -> list:
     for signal, grp in groups.items():
         fired = True
         mark_dir(st, df, signal)
+        if alert_logger:                      # v9.3: forward-test log, must never stop an alert
+            try:
+                pro, con = context_votes(df, fut, ind, signal, float(price))
+                alert_logger.log_alert(df.index[-1], now, grp, 1 if signal == CALL else -1, float(price),
+                                       ALERT_RISK_PTS, pro, con)
+            except Exception as e:
+                print(f"  alert log failed: {e}")
         upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
         for s in grp:
             if s["kind"] == "OPENING BREAK":
@@ -1558,7 +1594,7 @@ def sync_futures(df, fut, fut_key, retries=3, wait=5):
 
 
 def main():
-    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v9.1).\n")
+    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v9.3).\n")
     fut_key, fut_name = None, None
     try:
         fut_key, fut_name = get_future_key()
@@ -1570,7 +1606,7 @@ def main():
     if relay_run:
         send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
     else:
-        send_telegram(f"Nifty scanner v9.1 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
+        send_telegram(f"Nifty scanner v9.3 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
                       + f"No BREAKOUT after {BREAKOUT_LAST[0]}:{BREAKOUT_LAST[1]:02d}, nothing new after "
@@ -1595,8 +1631,22 @@ def main():
                     df = fetch_candles(INDEX_KEY)
                     fut = fetch_candles(fut_key) if fut_key else None
                     summary = eod_summary(df, fut)
+                    if alert_logger:                  # v9.3: fill in today's outcomes, add the forward-test tally
+                        try:
+                            alert_logger.resolve_day(df)
+                            tally = alert_logger.tally()
+                            if tally:
+                                summary += "\n\n" + tally
+                        except Exception as e:
+                            print(f"  forward-test summary failed: {e}")
                     print(summary)
                     send_telegram(summary)
+                    if alert_logger:                  # v9.3: the day's alerts CSV, with results, to Telegram too
+                        try:
+                            send_telegram_file(alert_logger.day_path(f"{df.index[-1]:%Y-%m-%d}"),
+                                               f"All alerts of {df.index[-1]:%Y-%m-%d} with results")
+                        except Exception as e:
+                            print(f"  alerts CSV to Telegram failed: {e}")
                 except Exception as e:
                     print(f"End-of-day summary failed: {e}")
                     send_telegram("Market closed. Scanner stopped for the day.")
