@@ -6,6 +6,8 @@ What it does
                     day's own file alerts/alerts_YYYY-MM-DD.csv (entry, stop, target, context, and how many
                     seconds after the candle closed the alert was created). One CSV per trading day.
   2. resolve_day(): called once after 15:30. Fills in what happened next, from the day's 1-minute candles.
+  (v9.4: each row also gets nth_today = alert number of the day and losses_before = earlier losses that day,
+   filled in by resolve_day().)
   3. tally():       text summary by alert type (win rate with a 95% range, last-30 rolling rate, and the same
                     test with a 1- and 2-candle late entry). Appended to the end-of-day Telegram message.
 
@@ -37,7 +39,7 @@ BASELINE = {"OPENING BREAK": 60, "BREAKOUT": 67, "PULLBACK": 70}   # win % from 
 COLS = ["date", "candle_time", "sent_at", "latency_s", "kinds", "signal", "entry", "stop", "target", "risk_pts",
         "ctx_for", "ctx_against",
         "fixed_result", "fixed_min", "fixed_ambig", "own_result", "own_min", "own_ambig",
-        "d1_result", "d2_result", "net60", "mfe60", "mae60"]
+        "d1_result", "d2_result", "net60", "mfe60", "mae60", "nth_today", "losses_before"]
 
 
 def wilson(wins, n, z=1.96):
@@ -110,6 +112,10 @@ def log_alert(candle_time, sent_at, grp, d, price, risk_pts=RISK_PTS, pro=(), co
                entry=f"{entry:.2f}", stop=f"{stop:.2f}", target=f"{target:.2f}", risk_pts=f"{risk:.1f}",
                ctx_for="; ".join(pro), ctx_against="; ".join(con))
     cur = _read(path)
+    if os.path.exists(path):                 # an older file with fewer columns: rewrite it with the current ones first
+        with open(path, encoding="utf-8") as fh:
+            if fh.readline().strip().split(",") != COLS:
+                cur.to_csv(path, index=False)
     dup = ((cur["date"] == row["date"]) & (cur["candle_time"] == row["candle_time"])
            & (cur["kinds"] == kinds) & (cur["signal"] == row["signal"])).any()
     if dup:
@@ -129,6 +135,7 @@ def resolve_day(df, path=None, day=None):
         return 0
     d = df[[f"{t:%Y-%m-%d}" == day for t in df.index]]
     n_done = 0
+    before_cols = log[["nth_today", "losses_before"]].copy()
     for idx in log.index[(log["date"] == day) & (log["fixed_result"] == "")]:
         r = log.loc[idx]
         t = pd.Timestamp(f"{day} {r['candle_time']}")
@@ -154,7 +161,13 @@ def resolve_day(df, path=None, day=None):
             log.loc[idx, ["net60", "mfe60", "mae60"]] = [f"{sign * (w['Close'].iloc[-1] - entry):.1f}",
                                                           f"{max(0.0, best):.1f}", f"{max(0.0, worst):.1f}"]
         n_done += 1
-    if n_done:
+    # alert number of the day, and how many of the day's earlier alerts had already lost (also for older rows)
+    day_rows = log[log["date"] == day].sort_values("candle_time")
+    losses = 0
+    for k, idx in enumerate(day_rows.index, start=1):
+        log.loc[idx, ["nth_today", "losses_before"]] = [str(k), str(losses)]
+        losses += int(log.loc[idx, "fixed_result"] == "L")
+    if n_done or not before_cols.equals(log[["nth_today", "losses_before"]]):
         log.to_csv(path, index=False)
     return n_done
 
@@ -197,6 +210,12 @@ def tally(path=None, last_n=30):
             w3, n3, _ = _rate(rows.tail(last_n), "fixed_result")
             if n3:
                 out.append(f"  last {min(last_n, len(rows))} alerts: {w3}/{n3} = {w3 / n3:.0%}")
+            nth = pd.to_numeric(rows["nth_today"], errors="coerce")
+            wf, nf, _ = _rate(rows[nth == 1], "fixed_result")
+            wl, nl, _ = _rate(rows[nth > 1], "fixed_result")
+            if nf and nl:
+                out.append(f"  first alert of the day: {wf}/{nf} = {wf / nf:.0%} | later alerts: {wl}/{nl} = {wl / nl:.0%} "
+                           "(replay: 52% vs 70%)")
             lat = pd.to_numeric(rows["latency_s"], errors="coerce").dropna()
             if len(lat):
                 out.append(f"  alert latency after candle close: median {lat.median():.0f}s, worst {lat.max():.0f}s "
