@@ -1,6 +1,22 @@
 """
-Nifty 50 multi-signal scanner v9.3 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v9.7 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
+
+v9.7 change: the day's PREMIUM TRACE file (alerts/premium_trace_YYYY-MM-DD.csv: each paper trade's 1-minute option
+prices) is sent to Telegram after the close, next to the paper-trade CSV and the alerts CSV. Nothing else changed.
+
+v9.6 / v9.5 change: PAPER TRADING (no real orders, no signal rule changed). Every live CALL/PUT alert (SWING included,
+unless listed in PAPER_SKIP_KINDS) also opens simulated option trades: one on the CE (CALL) or PE (PUT) priced 20-25 in the
+option chain and one on the ATM option. Each is replayed four ways (fixed stop 3 / target 10; a ladder; wide 6/15;
+wide 8/20; ATM stops scaled by delta / 0.3), after the close, from the option's 1-minute candles. Saved to
+alerts/paper_YYYY-MM-DD.csv, added to the end-of-day message (with a breakdown by alert type) and sent as a file.
+See paper_trader.py. If paper_trader.py is missing, or PAPER_TRADING is False, the scanner runs as before.
+
+v9.4 change: (1) LATE-CANDLE WAIT. On 19-20 Nov, 6 of 9 alerts were created ~69 s after their candle closed
+instead of ~9 s, because the feed often has the just-closed minute late and the scanner only caught it on the next pass.
+Now, if the index or futures feed is missing the candle that just closed, it re-fetches every 4 s (until second 45 of the
+minute) before judging. No signal rule changed. (2) The alert log gets two columns, nth_today and losses_before, and the
+forward-test summary compares the first alert of the day with the later ones.
 
 v9.3 change: FORWARD-TEST LOG (no signal rule changed). Every live CALL/PUT alert is appended to that day's own file
 alerts/alerts_YYYY-MM-DD.csv by alert_logger.py (the same CSV is also sent to Telegram after the close) (entry, stop, target, context, seconds after the candle closed). After 15:30 the outcomes are filled in
@@ -133,6 +149,12 @@ try:
     import alert_logger          # v9.3 forward-test log; optional
 except ImportError:
     alert_logger = None
+try:
+    import paper_trader          # v9.5 paper trading on options; optional
+except ImportError:
+    paper_trader = None
+PAPER_TRADING = True             # v9.6: simulate an option trade for every live alert (no real orders)
+PAPER_SKIP_KINDS = ()            # alert types that get NO paper trade, e.g. ("SWING",). Empty = every live alert is paper-traded
 
 INDEX_KEY = "NSE_INDEX|Nifty 50"
 INSTR_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
@@ -436,6 +458,19 @@ def log_option_csv(snap, now):
         pd.DataFrame([row]).to_csv(path, mode="a", header=new, index=False)
     except Exception as e:
         print(f"  Option CSV not saved: {e}")
+
+
+def paper_chain():
+    """v9.5: a fresh option chain (not the 5-minute cache) for the paper trader. Returns (expiry, rows)."""
+    exp = option_expiry()
+    token = os.environ.get("UPSTOX_ACCESS_TOKEN")
+    if not exp or not token:
+        raise ValueError("no option expiry or no token")
+    r = requests.get("https://api.upstox.com/v2/option/chain",
+                     params={"instrument_key": INDEX_KEY, "expiry_date": exp},
+                     headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, timeout=10)
+    r.raise_for_status()
+    return exp, r.json().get("data")
 
 
 def option_snapshot(spot):
@@ -1410,6 +1445,12 @@ def process_candle(df, fut, now, st: State) -> list:
                                        ALERT_RISK_PTS, pro, con)
             except Exception as e:
                 print(f"  alert log failed: {e}")
+        if paper_trader and PAPER_TRADING and not all(s["kind"] in PAPER_SKIP_KINDS for s in grp):
+            try:                              # v9.6: only queued here; the option is opened after the alert is sent
+                paper_trader.queue_signal(df.index[-1], 1 if signal == CALL else -1,
+                                          " + ".join(s["kind"] for s in grp), now)
+            except Exception as e:
+                print(f"  paper queue failed: {e}")
         upd = "UPDATE: this confirms the earlier WAIT note.\n" if st.watch else ""
         for s in grp:
             if s["kind"] == "OPENING BREAK":
@@ -1593,8 +1634,31 @@ def sync_futures(df, fut, fut_key, retries=3, wait=5):
     return df, fut
 
 
+def wait_for_newest_candle(df, fut, fut_key, max_second=45, wait=4):
+    """v9.4: the feed often has the candle that just closed a few seconds to a minute late. If the index or futures data
+    is still missing that candle, re-fetch every `wait` s, but give up at second `max_second` of the minute so the loop
+    stays on its minute (the sleep below wakes at ~:08, and a late finish would skip a whole candle)."""
+    while True:
+        t = datetime.now(IST)
+        expected = t.replace(second=0, microsecond=0) - timedelta(minutes=1)      # the candle that just closed
+        if not len(df) or not ((9, 15) <= (expected.hour, expected.minute) <= (15, 29)):
+            return df, fut
+        have_df = df.index[-1] >= expected
+        have_fut = fut is None or not len(fut) or fut.index[-1] >= expected
+        if (have_df and have_fut) or t.second >= max_second:
+            return df, fut
+        time.sleep(wait)
+        try:
+            if not have_df:
+                df = fetch_candles(INDEX_KEY)
+            if not have_fut:
+                fut = fetch_candles(fut_key)
+        except requests.RequestException:
+            return df, fut
+
+
 def main():
-    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v9.3).\n")
+    print(f"Scanning {INDEX_KEY} every {REFRESH_SECONDS}s (multi-signal mode, v9.7).\n")
     fut_key, fut_name = None, None
     try:
         fut_key, fut_name = get_future_key()
@@ -1606,7 +1670,7 @@ def main():
     if relay_run:
         send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
     else:
-        send_telegram(f"Nifty scanner v9.3 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
+        send_telegram(f"Nifty scanner v9.7 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
                       + f"No BREAKOUT after {BREAKOUT_LAST[0]}:{BREAKOUT_LAST[1]:02d}, nothing new after "
@@ -1639,8 +1703,27 @@ def main():
                                 summary += "\n\n" + tally
                         except Exception as e:
                             print(f"  forward-test summary failed: {e}")
+                    if paper_trader and PAPER_TRADING:        # v9.5: replay today's paper trades on the option candles
+                        try:
+                            paper_trader.resolve_day(fetch_candles, f"{df.index[-1]:%Y-%m-%d}")
+                            ptxt = paper_trader.tally()
+                            if ptxt:
+                                summary += "\n\n" + ptxt
+                        except Exception as e:
+                            print(f"  paper summary failed: {e}")
                     print(summary)
                     send_telegram(summary)
+                    if paper_trader and PAPER_TRADING:
+                        try:
+                            send_telegram_file(paper_trader.day_path(f"{df.index[-1]:%Y-%m-%d}"),
+                                               f"Paper trades of {df.index[-1]:%Y-%m-%d} (simulated, no real orders)")
+                        except Exception as e:
+                            print(f"  paper CSV to Telegram failed: {e}")
+                        try:                          # v9.7: the premium trace of the day's paper trades
+                            send_telegram_file(paper_trader.trace_path(f"{df.index[-1]:%Y-%m-%d}"),
+                                               f"Premium trace of {df.index[-1]:%Y-%m-%d}: 1-minute option prices of each paper trade")
+                        except Exception as e:
+                            print(f"  premium trace to Telegram failed: {e}")
                     if alert_logger:                  # v9.3: the day's alerts CSV, with results, to Telegram too
                         try:
                             send_telegram_file(alert_logger.day_path(f"{df.index[-1]:%Y-%m-%d}"),
@@ -1675,7 +1758,9 @@ def main():
                         fut = fetch_candles(fut_key)
                     except requests.RequestException as e:
                         print(f"  Futures fetch failed: {e}")
-                df, fut = sync_futures(df, fut, fut_key)
+                df, fut = wait_for_newest_candle(df, fut, fut_key)
+                now = datetime.now(IST)               # v9.4: after the wait, so the log shows the true creation time
+                df, fut = sync_futures(df, fut, fut_key, retries=0)   # the wait above replaced its retries; this only trims
                 if len(df) and df.index[-1] != last_candle:  # evaluate each candle once
                     last_candle = df.index[-1]
                     obs = observation(df, fut)
@@ -1689,6 +1774,13 @@ def main():
                         for m in process_candle(df, fut, now, st):
                             print(m.replace("\n", " | "))
                             send_telegram(m)
+                        if paper_trader and PAPER_TRADING:      # v9.5: open the queued paper trades AFTER the alerts went out
+                            try:
+                                for pm in paper_trader.open_pending(paper_chain, datetime.now(IST)):
+                                    print(pm.replace("\n", " | "))
+                                    send_telegram(pm, silent=True)
+                            except Exception as e:
+                                print(f"  paper trade failed: {e}")
                     if len(df) >= FULL_CANDLES:
                         _, _, why, _ = analyze(df, fut)
                         for w in why:
