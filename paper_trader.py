@@ -61,6 +61,13 @@ EXIT_AT = (15, 15)                                         # still open then: ex
 ENTRY_LAST = (15, 10)                                      # an alert after this time is not paper-traded (status TOO LATE)
 LOT_SIZE = 65                                              # Nifty lot size since the January 2026 contracts (only a multiplier)
 IST = timezone(timedelta(hours=5, minutes=30))
+# Charges per round trip (buy order + sell order) on Upstox, options. Rates change; check Upstox's charge calculator.
+BROKERAGE_PER_ORDER = 20.0        # Rs, flat per executed order
+STT_ON_SELL = 0.0015              # 0.15% of the premium sold (older Upstox pages still show 0.1%)
+EXCHANGE_TXN = 0.000495           # NSE options, % of premium, both sides (Upstox's own page; other lists show about 0.0355%)
+SEBI_FEE = 10 / 1e7               # Rs 10 per crore
+STAMP_ON_BUY = 0.00003            # 0.003% of the premium bought
+GST = 0.18                        # on brokerage + exchange charge + SEBI fee
 VARIANTS = ("fixed", "ladder", "wide6", "wide8")
 RULES = {                                                  # option points for an option priced about 20-25
     "fixed": dict(stop=3.0, target=10.0),
@@ -76,7 +83,9 @@ SCALE_MIN, SCALE_MAX = 0.5, 3.5
 
 COLS = (["date", "candle_time", "opened_at", "kinds", "signal", "opt_type", "mode", "delta", "scale", "expiry", "strike", "instrument_key",
          "chain_ltp", "bid", "ask", "status", "note", "entry_time", "entry", "mfe60", "mae60"]
-        + [f"{v}_{k}" for v in VARIANTS for k in ("reason", "exit", "net", "min")])
+        + [f"{v}_{k}" for v in VARIANTS for k in ("reason", "exit", "net", "min", "exit_time", "start_stop", "start_target",
+                                                  "pnl_rs", "charges_rs", "real_pnl_rs")]
+        + ["ladder_moves"])
 
 _QUEUE = []
 
@@ -273,6 +282,17 @@ def open_pending(fetch_rows, now=None):
 
 
 # ---------------------------------------------------------------- 2. replaying the trade
+def charges_rs(entry, exit_px):
+    """Brokerage + STT + exchange + SEBI + stamp duty + GST (Rs) for buying at entry and selling at exit_px, one lot.
+    The slippage (half a point each side) is treated as part of the fill prices, as in net = exit - entry - 2 x slippage."""
+    buy = (entry + SLIPPAGE_PTS) * LOT_SIZE
+    sell = max(exit_px - SLIPPAGE_PTS, 0.0) * LOT_SIZE
+    brok = 2 * BROKERAGE_PER_ORDER
+    txn = EXCHANGE_TXN * (buy + sell)
+    sebi = SEBI_FEE * (buy + sell)
+    return brok + STT_ON_SELL * sell + txn + sebi + STAMP_ON_BUY * buy + GST * (brok + txn + sebi)
+
+
 def ladder_levels(entry, best, sl_pts=None, target_pts=None, first_trigger=None, first_above=None, step=None):
     """Stop and target for the ladder variant when the best price so far is `best`."""
     sl_pts = SL_PTS if sl_pts is None else sl_pts
@@ -297,9 +317,11 @@ def simulate(c, variant, scale=1.0, exit_at=None):
     entry = float(c["Open"].iloc[0])
     t0 = c.index[0]
     sl, tp, best = entry - sl_pts, entry + target_pts, entry
+    moves = []                                                   # ladder only: (minute, new stop, new target)
 
     def done(reason, price, t):
-        return dict(reason=reason, exit=price, minutes=int(round((t - t0).total_seconds() / 60)))
+        return dict(reason=reason, exit=price, minutes=int(round((t - t0).total_seconds() / 60)),
+                    time=f"{t:%H:%M}", moves=moves, stop0=entry - sl_pts, target0=entry + target_pts)
 
     for t, r in c.iterrows():
         o, h, lo_, cl = float(r["Open"]), float(r["High"]), float(r["Low"]), float(r["Close"])
@@ -316,8 +338,29 @@ def simulate(c, variant, scale=1.0, exit_at=None):
             return done("TARGET", tp, t)
         if lad:
             best = max(best, h)
-            sl, tp = ladder_levels(entry, best, sl_pts, target_pts, FIRST_TRIGGER_PTS * scale, FIRST_STOP_ABOVE * scale, STEP_PTS * scale)
+            nsl, ntp = ladder_levels(entry, best, sl_pts, target_pts, FIRST_TRIGGER_PTS * scale, FIRST_STOP_ABOVE * scale, STEP_PTS * scale)
+            if abs(nsl - sl) > 1e-9:
+                moves.append((f"{t:%H:%M}", nsl, ntp))            # the minute whose high caused it; applies from the next minute
+            sl, tp = nsl, ntp
     return done("EOD (data ended)", float(c["Close"].iloc[-1]), c.index[-1])
+
+
+def _apply_variants(log, idx, after, scale):
+    """Replay the four rules on the candles `after` (first candle = entry) and write every result column of row idx."""
+    entry = float(after["Open"].iloc[0])
+    moves_text = ""
+    for v in VARIANTS:
+        res = simulate(after, v, scale)
+        net = res["exit"] - entry - 2 * SLIPPAGE_PTS
+        pnl = net * LOT_SIZE
+        chg = charges_rs(entry, res["exit"])
+        log.loc[idx, [f"{v}_{k}" for k in ("reason", "exit", "net", "min", "exit_time", "start_stop", "start_target",
+                                          "pnl_rs", "charges_rs", "real_pnl_rs")]] = [
+            res["reason"], f"{res['exit']:.2f}", f"{net:.2f}", str(res["minutes"]), res["time"],
+            f"{res['stop0']:.2f}", f"{res['target0']:.2f}", f"{pnl:.0f}", f"{chg:.0f}", f"{pnl - chg:.0f}"]
+        if v == "ladder":
+            moves_text = "; ".join(f"{m} stop {a:.2f} target {b:.2f}" for m, a, b in res["moves"]) or "none"
+    log.loc[idx, "ladder_moves"] = moves_text
 
 
 def resolve_day(fetch_candles, day, path=None):
@@ -350,16 +393,38 @@ def resolve_day(fetch_candles, day, path=None):
         log.loc[idx, ["entry_time", "entry"]] = [f"{after.index[0]:%H:%M}", f"{entry:.2f}"]
         w = after.iloc[:60]
         log.loc[idx, ["mfe60", "mae60"]] = [f"{max(0.0, w['High'].max() - entry):.2f}", f"{max(0.0, entry - w['Low'].min()):.2f}"]
-        scale = _num(r["scale"]) or 1.0
-        for v in VARIANTS:
-            res = simulate(after, v, scale)
-            net = res["exit"] - entry - 2 * SLIPPAGE_PTS
-            log.loc[idx, [f"{v}_reason", f"{v}_exit", f"{v}_net", f"{v}_min"]] = [
-                res["reason"], f"{res['exit']:.2f}", f"{net:.2f}", str(res["minutes"])]
+        _apply_variants(log, idx, after, _num(r["scale"]) or 1.0)
         log.loc[idx, ["status", "note"]] = ["DONE", log.loc[idx, "note"] if log.loc[idx, "status"] == "OPEN" else "resolved on retry"]
         n_done += 1
     log.to_csv(path, index=False)
     return n_done
+
+
+def rebuild_from_trace(paper_path, trace_path_):
+    """Re-fill every result column of an existing day file from its premium trace (no network). Used to give a day that was
+    saved with fewer columns the full per-trade profit and loss. Returns (rows rebuilt, rows whose net changed by > 0.01)."""
+    log = _read(paper_path)
+    tr = pd.read_csv(trace_path_, dtype=str, keep_default_na=False)
+    for c in ("open", "high", "low", "close"):
+        tr[c] = tr[c].astype(float)
+    rebuilt = changed = 0
+    for idx in log.index[log["status"] == "DONE"]:
+        r = log.loc[idx]
+        blk = tr[(tr["alert_time"] == r["candle_time"]) & (tr["mode"] == (r["mode"] or "OTM")) & (tr["signal"] == r["signal"])]
+        if blk.empty:
+            continue
+        cdl = pd.DataFrame({"Open": blk["open"].values, "High": blk["high"].values, "Low": blk["low"].values, "Close": blk["close"].values},
+                           index=pd.to_datetime(blk["date"] + " " + blk["time"]).values)
+        after = cdl[cdl.index > pd.Timestamp(r["opened_at"]).to_datetime64()]
+        if not len(after):
+            continue
+        old = {v: _num(r[f"{v}_net"]) for v in VARIANTS}
+        _apply_variants(log, idx, after, _num(r["scale"]) or 1.0)
+        rebuilt += 1
+        if any(old[v] is not None and abs(old[v] - float(log.loc[idx, f"{v}_net"])) > 0.011 for v in VARIANTS):
+            changed += 1
+    log.to_csv(paper_path, index=False)
+    return rebuilt, changed
 
 
 # ---------------------------------------------------------------- 3. summary
@@ -375,19 +440,28 @@ def tally(paper_dir=None):
     skipped = log[~log["status"].isin(["OPEN", "DONE"])]
     out = [f"PAPER TRADES ({len(files)} days): {len(done)} traded, {len(skipped)} skipped of {len(log)} trades "
            f"(each alert = one {PREMIUM_MIN:g}-{PREMIUM_MAX:g} option trade + one ATM trade). Option points after "
-           f"{2 * SLIPPAGE_PTS:g} slippage, no brokerage/tax."]
+           f"{2 * SLIPPAGE_PTS:g} slippage; Rs at lot {LOT_SIZE} also shown after brokerage, taxes and charges (Upstox rates)."]
     if len(skipped):
         out.append("  skipped: " + ", ".join(f"{k} {v}" for k, v in skipped["status"].value_counts().items()))
     if done.empty:
         return "\n".join(out)
+
+    def real(rows, v):
+        """Real P&L in Rs per trade: (exit - entry - slippage) x lot - charges."""
+        e = pd.to_numeric(rows["entry"], errors="coerce")
+        x = pd.to_numeric(rows[f"{v}_exit"], errors="coerce")
+        return pd.Series([(xx - ee - 2 * SLIPPAGE_PTS) * LOT_SIZE - charges_rs(ee, xx) if pd.notna(ee) and pd.notna(xx) else float("nan")
+                          for ee, xx in zip(e, x)], index=rows.index)
 
     def line(rows, v):
         net = pd.to_numeric(rows[f"{v}_net"], errors="coerce").dropna()
         if net.empty:
             return None
         wins = int((net > 0).sum())
-        return (f"    {LABELS[v]}: {wins}/{len(net)} won = {wins / len(net):.0%}, avg {net.mean():+.1f} pts, "
-                f"total {net.sum():+.0f} pts (about Rs {net.sum() * LOT_SIZE:+,.0f} at lot {LOT_SIZE})")
+        rp = real(rows, v).dropna()
+        return (f"    {LABELS[v]}: {wins}/{len(net)} won = {wins / len(net):.0%}, avg {net.mean():+.1f} pts | "
+                f"Rs {net.sum() * LOT_SIZE:+,.0f} after slippage, Rs {rp.sum():+,.0f} after charges "
+                f"(profit {rp[rp > 0].sum():+,.0f}, loss {rp[rp <= 0].sum():+,.0f})")
 
     for mode, title in (("OTM", f"Option priced {PREMIUM_MIN:g}-{PREMIUM_MAX:g} (stops in points)"),
                         ("ATM", f"ATM option (stops = the same rules x delta/{REF_DELTA:g})")):
@@ -404,6 +478,17 @@ def tally(paper_dir=None):
             sub = otm[otm["kinds"].apply(lambda s, k=k: k in s.split(" + "))]
             tot = [pd.to_numeric(sub[f"{v}_net"], errors="coerce").sum() for v in VARIANTS]
             out.append(f"    {k}: {len(sub)} trades | " + " | ".join(f"{t:+.0f}" for t in tot))
+    # expiry day (the options expire the same day: tiny premiums, huge swings) behaves very differently from other days
+    done = done.assign(daytype=["expiry day" if e and e == d_ else "other days" for e, d_ in zip(done["expiry"], done["date"])])
+    if done["daytype"].nunique() > 1 or (done["daytype"] == "expiry day").any():
+        out.append("  by day type (both options together, total Rs after charges; expiry day = options expire that day):")
+        for dt in ("expiry day", "other days"):
+            sub = done[done["daytype"] == dt]
+            if sub.empty:
+                continue
+            tot = [real(sub, v).sum() for v in VARIANTS]
+            out.append(f"    {dt}: {sub['date'].nunique()} day(s), {len(sub)} trades | " + " | ".join(f"{t:+,.0f}" for t in tot)
+                       + f"   ({' | '.join(VARIANTS)})")
     if len(otm) < 30:
         out.append("  too few trades to judge yet")
     return "\n".join(out)
