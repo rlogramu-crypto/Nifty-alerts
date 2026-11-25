@@ -1,0 +1,8 @@
+date,candle_time,sent_at,latency_s,kinds,signal,entry,stop,target,risk_pts,ctx_for,ctx_against,fixed_result,fixed_min,fixed_ambig,own_result,own_min,own_ambig,d1_result,d2_result,net60,mfe60,mae60,nth_today,losses_before
+2026-11-25,10:42,10:43:12,12,BREAKOUT,CALL,25833.45,25803.45,25863.45,30.0,flow,options,,,,,,,,,,,,,
+2026-11-25,11:02,11:03:28,29,BREAKOUT,CALL,25902.50,25872.50,25932.50,30.0,flow; vol+price,,,,,,,,,,,,,,
+2026-11-25,11:44,11:45:20,21,SWING,CALL,25949.50,25893.90,26005.10,55.6,flow,,,,,,,,,,,,,,
+2026-11-25,12:19,12:20:32,33,SWING,CALL,25901.80,25854.20,25949.40,47.6,,,,,,,,,,,,,,,
+2026-11-25,13:24,13:25:29,29,SWING,CALL,25684.95,25629.15,25740.75,55.8,,,,,,,,,,,,,,,
+2026-11-25,13:48,13:49:24,24,SWING,CALL,25727.75,25674.60,25780.90,53.2,,,,,,,,,,,,,,,
+2026-11-25,14:01,14:02:33,33,PULLBACK,CALL,25768.65,25738.65,25798.65,30.0,flow; vol+price,,,,,,,,,,,,,,
