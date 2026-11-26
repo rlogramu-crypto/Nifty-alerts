@@ -1,0 +1,61 @@
+name: Market monitor
+# A SEPARATE scanner (Nifty 50 and Sensex, 15-minute candles). It never touches the Nifty alerts workflow.
+# Start it with a cron-job.org job that calls this workflow's dispatch address every 15 minutes (see the chat for the settings):
+#   body {"ref":"main","inputs":{"mode":"once"}}   Monday-Friday, hour 9-15, minutes 1,16,31,46, time zone Asia/Kolkata.
+# To test it first: Actions tab > Market monitor > Run workflow > mode = backtest. The result arrives in Telegram.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "once = judge the latest completed 15-minute candle; backtest = replay recent history and report"
+        required: false
+        default: "once"
+      days:
+        description: "backtest only: calendar days of history (1-60)"
+        required: false
+        default: "25"
+permissions:
+  contents: write               # lets the run save alerts/monitor_*.csv
+concurrency:
+  group: market-monitor         # never two monitor runs at once (no double alerts)
+  cancel-in-progress: false
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Run the monitor
+        env:
+          MODE: ${{ inputs.mode }}
+          DAYS: ${{ inputs.days }}
+          PYTHONUNBUFFERED: "1"
+          UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN || secrets.UPSTOX_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
+        run: |
+          if [ "$MODE" = "backtest" ]; then
+            python market_monitor.py --backtest --days "${DAYS:-25}"
+          else
+            python market_monitor.py --once
+          fi
+      - name: Save the monitor log
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -d alerts ]; then
+            git config user.name "github-actions"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add alerts
+            if ! git diff --cached --quiet; then
+              git commit -m "Update monitor log"
+              for i in 1 2 3; do
+                git pull --rebase origin main && git push origin HEAD:main && break
+                sleep 5
+              done
+            fi
+          fi
