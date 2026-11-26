@@ -390,7 +390,8 @@ def build_table(df: pd.DataFrame, fut) -> pd.DataFrame:
     t["vs_or_low"] = df["Close"] - orng["Low"].min()
     t.loc[t.index[:OPENING_RANGE_MIN], ["vs_or_high", "vs_or_low"]] = float("nan")
     names = {"INDICATION": "indication", "BREAKOUT": "strong", "FAKE BREAKOUT": "fake", "PULLBACK": "pullback",
-             "TREND REVERSE": "reverse", "OPENING BREAK": "opening_break", "SWING": "swing"}
+             "TREND REVERSE": "reverse", "OPENING BREAK": "opening_break", "SWING": "swing",
+             "VOLUME PRICE": "volume_price"}
     cols = {k: [] for k in ["weak_trend"] + list(names.values())}
     for i in range(len(df)):
         d = df.iloc[: i + 1]
@@ -400,7 +401,11 @@ def build_table(df: pd.DataFrame, fut) -> pd.DataFrame:
         found = {v: "" for v in names.values()}
         if i >= IND_MIN_CANDLES - 1:
             for sg in scan_candle(d, f)[0]:
-                found[names[sg["kind"]]] = sg["signal"].split()[1]
+                col = names.get(sg["kind"])
+                if col is None:
+                    continue  # unknown signal kind: skip instead of crashing
+                parts = sg["signal"].split()
+                found[col] = parts[1] if len(parts) > 1 else ""
         for k, v in found.items():
             cols[k].append(v)
     for k, v in cols.items():
