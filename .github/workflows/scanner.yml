@@ -61,6 +61,10 @@ jobs:
           UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN || secrets.UPSTOX_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN || secrets.TG_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID || secrets.TG_CHAT_ID }}
+      - name: Build paper-trade summary CSVs
+        if: always()
+        continue-on-error: true   # must never block the save or the hand-over
+        run: python paper_trader.py
       - name: Save the forward-test log
         if: always()
         continue-on-error: true   # must never block the hand-over below
