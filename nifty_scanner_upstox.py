@@ -186,6 +186,7 @@ try:
 except ImportError:
     paper_trader = None
 PAPER_TRADING = True             # v9.6: simulate an option trade for every live alert (no real orders)
+PAPER_ONLY_KINDS = ("BREAKOUT", "SWING")   # v9.11: paper-trade ONLY alerts that include one of these types (empty tuple = all live alerts). SWING was removed in v9.8, so today only BREAKOUT matches
 PAPER_SKIP_KINDS = ()            # alert types that get NO paper trade, e.g. ("VOLUME PRICE",). Empty = every live alert is paper-traded
 
 INDEX_KEY = "NSE_INDEX|Nifty 50"
@@ -1517,7 +1518,8 @@ def process_candle(df, fut, now, st: State) -> list:
                                        ALERT_RISK_PTS, pro, con)
             except Exception as e:
                 print(f"  alert log failed: {e}")
-        if paper_trader and PAPER_TRADING and not all(s["kind"] in PAPER_SKIP_KINDS for s in grp):
+        if paper_trader and PAPER_TRADING and not all(s["kind"] in PAPER_SKIP_KINDS for s in grp) \
+                and (not PAPER_ONLY_KINDS or any(s["kind"] in PAPER_ONLY_KINDS for s in grp)):
             try:                              # v9.6: only queued here; the option is opened after the alert is sent
                 paper_trader.queue_signal(df.index[-1], 1 if signal == CALL else -1,
                                           " + ".join(s["kind"] for s in grp), now)
@@ -1805,60 +1807,4 @@ def main():
                     send_telegram("Market closed. Scanner stopped for the day.")
                 print("Market closed. Stopping.")
                 break
-            if MAX_RUN_MIN and (time.time() - started) / 60 >= MAX_RUN_MIN and market_open():
-                with open("relay_needed", "w") as fh:        # the workflow starts the next run when it sees this file
-                    fh.write(st.trend_reported or "")
-                send_telegram("Handing over to a fresh GitHub run now (GitHub stops a job after 6 hours). "
-                              "Alerts continue in about a minute.")
-                print("Relay hand-over requested. Stopping this run.")
-                break
-            if not market_open():
-                print("Waiting for market open (9:15 IST, Mon-Fri)...")
-            else:
-                df = fetch_candles(INDEX_KEY)
-                if not len(df) and (now.hour, now.minute) >= (9, 35):
-                    # 20 minutes after the open and still no candles: a market holiday or no data
-                    send_telegram("No Nifty candles today, so the market looks closed (holiday?). "
-                                  "Scanner stopping for the day.")
-                    print("No candles after 09:35 on a weekday. Stopping (holiday?).")
-                    break
-                fut = None
-                if fut_key:
-                    try:
-                        fut = fetch_candles(fut_key)
-                    except requests.RequestException as e:
-                        print(f"  Futures fetch failed: {e}")
-                df, fut = wait_for_newest_candle(df, fut, fut_key)
-                now = datetime.now(IST)               # v9.4: after the wait, so the log shows the true creation time
-                df, fut = sync_futures(df, fut, fut_key, retries=0)   # the wait above replaced its retries; this only trims
-                if len(df) and df.index[-1] != last_candle:  # evaluate each candle once
-                    last_candle = df.index[-1]
-                    obs = observation(df, fut)
-                    print(obs.replace("\n", " | "))
-                    obs_count += 1
-                    if OBSERVE_TELEGRAM_EVERY and obs_count % OBSERVE_TELEGRAM_EVERY == 0:
-                        send_telegram(obs, silent=True)
-                    if (OPTION_DATA or OPTION_CSV) and len(df):
-                        option_snapshot(float(df["Close"].iloc[-1]))   # keeps the option CSV filled every 5 minutes
-                    if len(df) >= IND_MIN_CANDLES:
-                        for m in process_candle(df, fut, now, st):
-                            print(m.replace("\n", " | "))
-                            send_telegram(m)
-                        if paper_trader and PAPER_TRADING:      # v9.5: open the queued paper trades AFTER the alerts went out
-                            try:
-                                for pm in paper_trader.open_pending(paper_chain, datetime.now(IST)):
-                                    print(pm.replace("\n", " | "))
-                                    send_telegram(pm, silent=True)
-                            except Exception as e:
-                                print(f"  paper trade failed: {e}")
-                    if len(df) >= FULL_CANDLES:
-                        _, _, why, _ = analyze(df, fut)
-                        for w in why:
-                            print(f"    {w}")
-        except requests.RequestException as e:
-            print(f"Network/API error: {e}")
-        time.sleep(max(5, 68 - datetime.now(IST).second))  # wake at ~:08 of the next minute
-
-
-if __name__ == "__main__":
-    main()
+            if MAX_RUN_MIN and (time.time() - started) / 60
