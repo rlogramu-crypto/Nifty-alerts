@@ -84,7 +84,7 @@ SCALE_MIN, SCALE_MAX = 0.5, 3.5
 COLS = (["date", "candle_time", "opened_at", "kinds", "signal", "opt_type", "mode", "delta", "scale", "expiry", "strike", "instrument_key",
          "chain_ltp", "bid", "ask", "status", "note", "entry_time", "entry", "mfe60", "mae60"]
         + [f"{v}_{k}" for v in VARIANTS for k in ("reason", "exit", "net", "min", "exit_time", "start_stop", "start_target",
-                                                  "pnl_rs", "charges_rs", "real_pnl_rs")]
+                                                  "pnl_rs", "charges_rs", "real_pnl_rs", "result")]
         + ["ladder_moves"])
 
 _QUEUE = []
@@ -345,6 +345,11 @@ def simulate(c, variant, scale=1.0, exit_at=None):
     return done("EOD (data ended)", float(c["Close"].iloc[-1]), c.index[-1])
 
 
+def _result(net):
+    """WIN / LOSS / FLAT from the net points (a loss is a NEGATIVE number in the *_net and *_pnl_rs columns)."""
+    return "WIN" if net > 0 else "LOSS" if net < 0 else "FLAT"
+
+
 def _apply_variants(log, idx, after, scale):
     """Replay the four rules on the candles `after` (first candle = entry) and write every result column of row idx."""
     entry = float(after["Open"].iloc[0])
@@ -355,9 +360,9 @@ def _apply_variants(log, idx, after, scale):
         pnl = net * LOT_SIZE
         chg = charges_rs(entry, res["exit"])
         log.loc[idx, [f"{v}_{k}" for k in ("reason", "exit", "net", "min", "exit_time", "start_stop", "start_target",
-                                          "pnl_rs", "charges_rs", "real_pnl_rs")]] = [
+                                          "pnl_rs", "charges_rs", "real_pnl_rs", "result")]] = [
             res["reason"], f"{res['exit']:.2f}", f"{net:.2f}", str(res["minutes"]), res["time"],
-            f"{res['stop0']:.2f}", f"{res['target0']:.2f}", f"{pnl:.0f}", f"{chg:.0f}", f"{pnl - chg:.0f}"]
+            f"{res['stop0']:.2f}", f"{res['target0']:.2f}", f"{pnl:.0f}", f"{chg:.0f}", f"{pnl - chg:.0f}", _result(net)]
         if v == "ladder":
             moves_text = "; ".join(f"{m} stop {a:.2f} target {b:.2f}" for m, a, b in res["moves"]) or "none"
     log.loc[idx, "ladder_moves"] = moves_text
@@ -494,5 +499,52 @@ def tally(paper_dir=None):
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------- 4. export with negative points and losses
+def export_all(paper_dir=None):
+    """Write two CSVs next to the day files (no network needed):
+      all_paper_trades.csv : every trade of every day. For each rule: net points (NEGATIVE on a loss), pnl_rs (points x lot,
+                             negative on a loss), charges_rs, real_pnl_rs (after charges) and result (WIN / LOSS / FLAT).
+                             Old day files that lack these columns are filled in from their entry / exit / net values.
+      paper_summary.csv    : per rule (and per OTM / ATM mode): wins, losses, winning points, LOSING points (negative),
+                             net points, Rs after slippage, charges, Rs after charges, gross profit and gross loss in Rs.
+    Returns (trades path, summary path), or None if there are no paper files."""
+    d = paper_dir or PAPER_DIR
+    files = sorted(glob.glob(os.path.join(d, "paper_2*.csv")))
+    if not files:
+        return None
+    log = pd.concat([_read(p) for p in files], ignore_index=True)
+    log["mode"] = log["mode"].replace("", "OTM")
+    en = pd.to_numeric(log["entry"], errors="coerce")
+    for v in VARIANTS:
+        net = pd.to_numeric(log[f"{v}_net"], errors="coerce")
+        ex = pd.to_numeric(log[f"{v}_exit"], errors="coerce")
+        chg = pd.Series([charges_rs(e, x) if pd.notna(e) and pd.notna(x) else float("nan") for e, x in zip(en, ex)], index=log.index)
+        log[f"{v}_pnl_rs"] = (net * LOT_SIZE).round(0)
+        log[f"{v}_charges_rs"] = chg.round(0)
+        log[f"{v}_real_pnl_rs"] = (net * LOT_SIZE - chg).round(0)
+        log[f"{v}_result"] = [_result(n) if pd.notna(n) else "" for n in net]
+    tpath, spath = os.path.join(d, "all_paper_trades.csv"), os.path.join(d, "paper_summary.csv")
+    log.to_csv(tpath, index=False)
+    rows = []
+    for mode in ("ALL", "OTM", "ATM"):
+        sub = log if mode == "ALL" else log[log["mode"] == mode]
+        for v in VARIANTS:
+            net = pd.to_numeric(sub[f"{v}_net"], errors="coerce").dropna()
+            if net.empty:
+                continue
+            real = pd.to_numeric(sub[f"{v}_real_pnl_rs"], errors="coerce").dropna()
+            rows.append({"mode": mode, "rule": v, "trades": len(net), "wins": int((net > 0).sum()), "losses": int((net < 0).sum()),
+                         "win_pct": round(100 * (net > 0).mean(), 1), "winning_points": round(net[net > 0].sum(), 2),
+                         "losing_points": round(net[net < 0].sum(), 2), "net_points": round(net.sum(), 2),
+                         "pnl_rs": round(net.sum() * LOT_SIZE), "charges_rs": round(pd.to_numeric(sub[f"{v}_charges_rs"], errors="coerce").sum()),
+                         "gross_profit_rs": round(real[real > 0].sum()), "gross_loss_rs": round(real[real < 0].sum()),
+                         "real_pnl_rs": round(real.sum())})
+    pd.DataFrame(rows).to_csv(spath, index=False)
+    return tpath, spath
+
+
 if __name__ == "__main__":      # python paper_trader.py  -> print the summary of the paper files
     print(tally() or "No paper trades yet.")
+    paths = export_all()                                  # also writes all_paper_trades.csv and paper_summary.csv
+    if paths:
+        print("\nwrote " + " and ".join(paths))
