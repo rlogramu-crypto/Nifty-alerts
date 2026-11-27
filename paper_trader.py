@@ -77,6 +77,7 @@ RULES = {                                                  # option points for a
 }
 LABELS = {"fixed": "fixed 3/10", "ladder": "ladder (+2 -> stop +1, then +2 per +2)", "wide6": "wide 6/15", "wide8": "wide 8/20"}
 ATM_TOO = os.environ.get("PAPER_ATM", "on").lower() not in ("off", "0", "no")
+OTM_TOO = os.environ.get("PAPER_OTM", "off").lower() not in ("off", "0", "no")   # 20-25 priced option lost on every rule in the first 4 days: OFF by default (PAPER_OTM=on brings it back)
 REF_DELTA = 0.3                                            # delta of an option priced about 20-25; ATM rules are scaled by delta / this
 DEFAULT_ATM_DELTA = 0.5                                    # used when the chain gives no delta
 SCALE_MIN, SCALE_MAX = 0.5, 3.5
@@ -230,6 +231,9 @@ def open_pending(fetch_rows, now=None):
     Returns a list of short Telegram messages (one per alert)."""
     if not _QUEUE:
         return []
+    if not (OTM_TOO or ATM_TOO):
+        _QUEUE.clear()
+        return []
     items = list(_QUEUE)
     _QUEUE.clear()
     now = now or datetime.now(IST)
@@ -242,7 +246,7 @@ def open_pending(fetch_rows, now=None):
     msgs = []
     for candle_time, d, kinds, sent_at in items:
         made = []
-        for mode in (("OTM", "ATM") if ATM_TOO else ("OTM",)):
+        for mode in (("OTM",) if OTM_TOO else ()) + (("ATM",) if ATM_TOO else ()):
             base = dict(date=f"{candle_time:%Y-%m-%d}", candle_time=f"{candle_time:%H:%M}", opened_at=f"{now:%Y-%m-%d %H:%M:%S}",
                         kinds=kinds, signal="CALL" if d > 0 else "PUT", opt_type="CE" if d > 0 else "PE", mode=mode,
                         expiry=expiry or "", scale="1")
