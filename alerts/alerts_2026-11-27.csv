@@ -1,0 +1,10 @@
+date,candle_time,sent_at,latency_s,kinds,signal,entry,stop,target,risk_pts,ctx_for,ctx_against,fixed_result,fixed_min,fixed_ambig,own_result,own_min,own_ambig,d1_result,d2_result,net60,mfe60,mae60,nth_today,losses_before
+2026-11-27,10:33,10:34:16,17,VOLUME PRICE,PUT,25768.75,25798.75,25738.75,30.0,flow; vol+price,,,,,,,,,,,,,,
+2026-11-27,10:51,10:52:16,17,VOLUME PRICE,PUT,25767.75,25797.75,25737.75,30.0,,,,,,,,,,,,,,,
+2026-11-27,10:55,10:56:13,13,PULLBACK,PUT,25744.60,25774.60,25714.60,30.0,flow,,,,,,,,,,,,,,
+2026-11-27,11:15,11:16:25,25,VOLUME PRICE + PULLBACK,PUT,25734.25,25764.25,25704.25,30.0,options,,,,,,,,,,,,,,
+2026-11-27,11:43,11:44:12,13,VOLUME PRICE,PUT,25692.70,25722.70,25662.70,30.0,flow; options,,,,,,,,,,,,,,
+2026-11-27,12:24,12:25:08,9,PULLBACK,PUT,25691.70,25721.70,25661.70,30.0,options,,,,,,,,,,,,,,
+2026-11-27,12:31,12:32:13,13,VOLUME PRICE,PUT,25707.35,25737.35,25677.35,30.0,flow,options,,,,,,,,,,,,,
+2026-11-27,13:26,13:27:24,25,VOLUME PRICE,PUT,25651.60,25681.60,25621.60,30.0,flow; vol+price,,,,,,,,,,,,,,
+2026-11-27,13:58,13:59:13,13,PULLBACK,PUT,25664.75,25694.75,25634.75,30.0,options,,,,,,,,,,,,,,
