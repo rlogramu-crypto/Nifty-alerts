@@ -1,7 +1,25 @@
 """
-Nifty 50 multi-signal scanner v9.10 (Upstox) -> Telegram alerts. Places NO orders.
+Nifty 50 multi-signal scanner v9.13 (Upstox) -> Telegram alerts. Places NO orders.
 Educational tool only. Not financial advice.
 
+v9.13 change: SUPPORT / RESISTANCE line in every live CALL/PUT alert (information only, nothing is blocked, no signal rule changed).
+Levels used: previous day high / low / close, today's high / low so far (before the signal candle), opening-range high / low, round
+numbers every SR_ROUND_STEP (100) points, and the biggest call / put OI strikes from the option chain. The alert shows the nearest
+support below and resistance above with the distance in points, and warns when the opposing level is within SR_NEAR_PTS (25) points
+(CALL with resistance close, PUT with support close). SR_ENABLED = False turns it off. Levels that fail to load are skipped silently.
+v9.13 also: PULL_NO_ENTRY_AFTER 14:30 -> 14:00; new VP_LAST (default 15:30 = no limit, same as before). Full replay of all alerts, 37 days
+(1 Oct - 27 Nov 2026, +30 before -30 within 60 min): BREAKOUT 70% (33) | PULLBACK 62% (74) | OPENING BREAK 67% (9) | VOLUME PRICE 60% (190) |
+SWING 56% (72, held-to-next-swing result differs) | TREND REVERSE 54% (54) | INDICATION 32% (19). Futures candles were rebuilt from the CSV
+(close only), so the numbers are close to, not identical with, the live ones. No costs or slippage.
+v9.12 change (SWING is back, merged into the v9.11 scanner, with time cut-offs; nothing else changed):
+(1) SWING alert restored exactly as in v9.7 (40-pt reversal off a day top / bottom, stop 5 pts beyond the extreme, held to the next
+swing signal or 15:00, stop-hit / exit messages, end-of-day swing lines). SWING_LAST = (14, 0): no new SWING alert from 14:00.
+(2) BREAKOUT_LAST = (14, 30): no new BREAKOUT alert from 14:30.
+(3) After those times there is NO paper trade for them: PAPER_ONLY_KINDS = (BREAKOUT, SWING) opens simulated trades only for alerts that
+include one of these two types, so from 14:30 the remaining alerts (e.g. VOLUME PRICE, PULLBACK) are alert-only. An already open swing
+idea still gets its stop-hit / exit message after 14:00. SWING settings are TUNED on 37 days (1 Oct - 27 Nov 2026): buffer 15, min bars 3, cooldown 15 (was 5 / 5 / 10), pts stay 40.
+With the 14:00 cut-off: all days +1,932 pts, 46% won, max drawdown 450 (old settings +1,757, 44%, 648); held-out last 13 days +213 vs +114.
+Small sample, no costs, chosen on the same data: expect less live. With a 13:30 cut-off the same settings did better (+2,210).
 v9.10 change (two additions, no signal rule changed, nothing is blocked):
 (1) EXPIRY DAY line. On the day of the Nifty weekly (or monthly) option expiry every live CALL/PUT alert gets one extra
 information line (option premiums decay fast, spreads can be wide). The expiry date comes from the same instruments file
@@ -160,6 +178,7 @@ Alert types (each labelled with a confidence level):
   FAKE BREAKOUT  LOWER    high-volume break that fails and closes back inside the range
   PULLBACK       LOWER    trend continuation: bounce against the trend fails
   TREND REVERSE  summary only (not sent live since v8.1)  fresh EMA cross + VWAP flip + break of recent structure
+  SWING          MEDIUM   40-pt reversal off a day top (PUT) or bottom (CALL), held to the next swing signal, none from 14:00 (v9.12)
   VOLUME PRICE   MEDIUM   3-candle move with volume up/down + futures VWAP + 30-min momentum confirmation, any time (v9.9)
   INDICATION     summary  early read on 8-24 candles, counted at end of day only
   TREND          info     UP / DOWN status when the weak-trend score holds 10 min (context, not an entry)
@@ -186,7 +205,7 @@ try:
 except ImportError:
     paper_trader = None
 PAPER_TRADING = True             # v9.6: simulate an option trade for every live alert (no real orders)
-PAPER_ONLY_KINDS = ("BREAKOUT", "SWING")   # v9.11: paper-trade ONLY alerts that include one of these types (empty tuple = all live alerts). SWING was removed in v9.8, so today only BREAKOUT matches
+PAPER_ONLY_KINDS = ("BREAKOUT", "SWING")   # v9.11: paper-trade ONLY alerts that include one of these types (empty tuple = all live alerts). SWING is back in v9.12; from 14:00 (SWING) and 14:30 (BREAKOUT) those types stop, so later alerts are alert-only
 PAPER_SKIP_KINDS = ()            # alert types that get NO paper trade, e.g. ("VOLUME PRICE",). Empty = every live alert is paper-traded
 
 INDEX_KEY = "NSE_INDEX|Nifty 50"
@@ -195,7 +214,23 @@ REFRESH_SECONDS = 60
 
 # ---- v7 time rules (edit to tune) ----
 NO_NEW_AFTER = (15, 30)      # alerts allowed through the whole session (09:15 to 15:30)
-BREAKOUT_LAST = (15, 30)      # no BREAKOUT time limit
+BREAKOUT_LAST = (14, 30)      # v9.12: no new BREAKOUT alert from 14:30
+
+# ---- v8 SWING top/bottom settings (edit to tune) ----
+SWING_PTS = 40               # reversal, in points, off the extreme that confirms a top or bottom
+SWING_MIN_BARS = 3           # the extreme must be at least this many candles old (v9.12 tuned, was 5)
+SWING_COOLDOWN_MIN = 15      # minutes between swing signals (v9.12 tuned, was 10)
+SWING_STOP_BUFFER = 15       # stop idea = swing extreme +/- this many points (v9.12 tuned, was 5)
+SWING_EMA_CONFIRM = False    # True: CALL needs close above EMA9, PUT needs close below (no consistent gain in the replay)
+SWING_START = (9, 20)        # swing tracking starts here (the first 5 candles are ignored)
+SWING_EXIT = (15, 0)         # exit idea for an open swing idea; also the last candle used in the end-of-day result
+VP_LAST = (15, 30)           # v9.13: no NEW VOLUME PRICE alert from this time. 15:30 = no limit (as v9.9). Replay: 154 alerts before 14:00 won 65%, 36 from 14:00 won 42% -> (14, 0) is worth trying
+SR_ENABLED = True            # v9.13: support / resistance line in live alerts (information only)
+SR_NEAR_PTS = 25             # warn when the opposing level is this close (CALL: resistance above, PUT: support below)
+SR_ROUND_STEP = 100          # round-number levels every this many points (100 -> 25,800 / 25,900 / 26,000 ...)
+SR_USE_OI_WALLS = True       # also use the biggest call (resistance) / put (support) OI strikes from the option chain
+SR_MERGE_PTS = 5             # levels this close to the nearest one are shown together
+SWING_LAST = (14, 0)           # v9.12: no NEW SWING alert from this time (an open swing idea still gets its stop / exit message)
 
 # ---- v9.8 VOLUME PRICE signal (live CALL / PUT alert, futures-VWAP confirmed; edit to tune) ----
 VP_WINDOW = 3                # candles used: average volume ratio and price move over the last 3 candles
@@ -290,7 +325,7 @@ FAKE_WINDOW = 8
 FAKE_VOL_RATIO = 1.5
 FAKE_MARGIN_PCT = 0.05
 PULL_BOUNCE_WINDOW = 6
-PULL_NO_ENTRY_AFTER = (14, 30)
+PULL_NO_ENTRY_AFTER = (14, 0)     # v9.13: was 14:30 (5 pullbacks from 14:00 on won 0 of 5 in the 37-day replay; v8.4 saw 40% after 14:00)
 PULL_NO_ENTRY_BEFORE = (10, 0)    # v9.0: pullbacks only 10:00-14:30
 PULL_MIN_RANGE_PCT = 0.20
 REV_CROSS_WINDOW = 10
@@ -312,18 +347,18 @@ MAX_RUN_MIN = float(os.environ.get("SCAN_MAX_MINUTES", "0") or 0)   # 0 = never 
 # ---- What is sent live vs only counted in the end-of-day summary ----
 # ---- v8.3 ACCURACY MODE: fewer, stricter alerts (False = v8.2 behaviour) ----
 ACCURACY_MODE = True
-LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK", "VOLUME PRICE") if ACCURACY_MODE
-              else ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "VOLUME PRICE"))
+LIVE_KINDS = (("OPENING BREAK", "BREAKOUT", "PULLBACK", "SWING", "VOLUME PRICE") if ACCURACY_MODE
+              else ("OPENING BREAK", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING", "VOLUME PRICE"))
 OB_MAX_RISK_PTS = 60         # skip OPENING BREAK if the stop (range middle) is further than this from the entry
 FLIP_COOLDOWN_MIN = 30       # no live alert in the opposite direction within this many minutes of the last live alert
 CHOP_WINDOW = 30             # candles checked for chop
 CHOP_MAX_CROSSES = 3         # this many VWAP or EMA9/21 crosses in the window = choppy, block
-CHOP_KINDS = ("BREAKOUT", "PULLBACK", "FAKE BREAKOUT")   # v8.4: BREAKOUT and PULLBACK are chop-filtered too
+CHOP_KINDS = ("BREAKOUT", "PULLBACK", "SWING", "FAKE BREAKOUT")   # v8.4: BREAKOUT and PULLBACK are chop-filtered too
 SEND_WAIT_NOTES = False
 
 # ---- Alignment filter: signals that go against price vs the day's open ----
 ALIGN_MODE = "block" if ACCURACY_MODE else "tag"   # "tag" = send but mark "against the open"; "block" = skip them; "off" = ignore
-ALIGN_KINDS = tuple(k for k in ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK")
+ALIGN_KINDS = tuple(k for k in ("INDICATION", "BREAKOUT", "FAKE BREAKOUT", "PULLBACK", "SWING")
                     if not (ACCURACY_MODE and k == "BREAKOUT"))   # a BREAKOUT already needs price on the right side of VWAP and EMAs
 
 # ---- Opening read (09:30) and OPENING BREAK ----
@@ -680,6 +715,7 @@ def alert_summary(df, fut, ind, signal, grp, price, ts) -> str:
     out = (f"SUMMARY: {'CALL' if d > 0 else 'PUT'} ({'UP' if d > 0 else 'DOWN'}) - {kinds}\n"
            f"Entry {entry:,.1f} | Stop {stop:,.1f} | Target {target:,.1f} ({risk:.0f} pts risk)\n"
            f"Context (info only): for {', '.join(pro) if pro else 'none'} | against {', '.join(con) if con else 'none'}\n")
+    out += sr_note(df, price, signal)
     out += option_line(price)
     ob = oi_buildup(df, fut)
     if ob:
@@ -1118,9 +1154,10 @@ def trend_events(df, fut):
 KINDS = (("INDICATION", "SUMMARY only (3 of 10 won)"),
          ("BREAKOUT", "HIGH confidence (about 7 in 10 won, 28 seen in 27 days, chop-filtered)"),
          ("FAKE BREAKOUT", "LOWER confidence (only 5 seen, 2 won)"),
-         ("PULLBACK", "MEDIUM confidence (about 7 in 10 won, 10:00-14:30, chop-filtered)"),
+         ("PULLBACK", "MEDIUM confidence (about 6 to 7 in 10 won, 10:00-14:00, chop-filtered)"),
          ("TREND REVERSE", "SUMMARY only (33 seen, 36% won, -286 pts)"),
          ("OPENING BREAK", "MEDIUM confidence (7 of 10 won with the stop)"),
+         ("SWING", "MEDIUM confidence (89 seen, about 44% won, +1,121 pts held to the next swing; late by design)"),
          ("VOLUME PRICE", "MEDIUM confidence (about 6 in 10 hit +30 before -30 in 60 min, 181 seen in 35 days, VWAP + 30-min momentum confirmed; no costs, one rising month)"))
 
 
@@ -1142,6 +1179,10 @@ def time_ok(df, kind) -> bool:
     t = df.index[-1]
     hm = (t.hour, t.minute)
     if hm >= NO_NEW_AFTER:
+        return False
+    if kind == "SWING" and hm >= SWING_LAST:          # v9.12
+        return False
+    if kind == "VOLUME PRICE" and hm >= VP_LAST:      # v9.13
         return False
     return not (kind == "BREAKOUT" and hm >= BREAKOUT_LAST)
 
@@ -1194,6 +1235,81 @@ def detect_opening_break(df):
             "why": [f"First close {'above' if up else 'below'} the opening range {lo:,.1f} to {hi:,.1f}",
                     f"Stop idea: the range middle {mid:,.1f} ({abs(c - mid):.0f} pts risk). "
                     f"Exit idea: {OB_EXIT[0]}:{OB_EXIT[1]:02d}"]}
+
+
+def swing_replay(df):
+    """All SWING signals so far today (same rules live and in the end-of-day replay).
+    A swing bottom is confirmed when price closes SWING_PTS above the lowest low since the last signal (and that
+    low is at least SWING_MIN_BARS candles old) -> CALL. A swing top is the mirror image -> PUT.
+    Signals must alternate (CALL, PUT, CALL ...). Returns a list of dicts."""
+    if len(df) < 10:
+        return []
+    mins = df.index.hour * 60 + df.index.minute
+    sel = np.flatnonzero((mins >= SWING_START[0] * 60 + SWING_START[1]) & (mins <= SWING_EXIT[0] * 60 + SWING_EXIT[1]))
+    if len(sel) < 2:
+        return []
+    hi, lo, cl = df["High"].values, df["Low"].values, df["Close"].values
+    ema = df["Close"].ewm(span=9, adjust=False).mean().values
+    out, last_d, last_i = [], 0, None
+    h = l = sel[0]
+    for i in sel[1:]:
+        if hi[i] > hi[h]:
+            h = i
+        if lo[i] < lo[l]:
+            l = i
+        c, d, ext_i = cl[i], 0, None
+        if last_d != 1 and c - lo[l] >= SWING_PTS and i - l >= SWING_MIN_BARS:
+            d, ext_i = 1, l
+            if SWING_EMA_CONFIRM and c < ema[i]:
+                d = 0
+        elif last_d != -1 and hi[h] - c >= SWING_PTS and i - h >= SWING_MIN_BARS:
+            d, ext_i = -1, h
+            if SWING_EMA_CONFIRM and c > ema[i]:
+                d = 0
+        if d and (last_i is None or mins[i] - mins[last_i] >= SWING_COOLDOWN_MIN):
+            ext = float(lo[ext_i] if d > 0 else hi[ext_i])
+            out.append({"i": int(i), "time": df.index[i], "d": d, "signal": CALL if d > 0 else PUT,
+                        "entry": float(c), "extreme": ext, "ext_time": df.index[ext_i],
+                        "stop": ext - d * SWING_STOP_BUFFER})
+            last_d, last_i = d, i
+            h = l = i
+    return out
+
+
+def detect_swing(df):
+    """SWING: a top or bottom just confirmed on the latest candle (v8)."""
+    sigs = swing_replay(df)
+    if not sigs or sigs[-1]["i"] != len(df) - 1:
+        return None
+    s = sigs[-1]
+    d, kind = s["d"], "bottom" if s["d"] > 0 else "top"
+    return {"signal": s["signal"], "key": f"{s['time']:%H:%M}", "entry": s["entry"], "stop": s["stop"], "d": d,
+            "why": [f"Swing {kind} {s['extreme']:,.1f} at {s['ext_time']:%H:%M}, price has reversed "
+                    f"{abs(s['entry'] - s['extreme']):.0f} pts ({SWING_PTS}-pt swing)",
+                    f"Stop idea: {s['stop']:,.1f} ({abs(s['entry'] - s['stop']):.0f} pts risk). Exit idea: the next "
+                    f"swing signal, or {SWING_EXIT[0]}:{SWING_EXIT[1]:02d}",
+                    "Late by design (confirmed after the reversal). About 4 in 10 swings win, a few big runs pay."]}
+
+
+def swing_outcomes(d):
+    """End-of-day result of every swing trade: held to the next swing signal (or SWING_EXIT), stop at the extreme +/- buffer.
+    Honours the v9.12 time rule (no new swing signal at or after SWING_LAST). Returns (lines, total_pts, trades)."""
+    sigs = [s for s in swing_replay(d) if (s["time"].hour, s["time"].minute) < SWING_LAST]
+    lines, total = [], 0.0
+    exit_i = int(np.flatnonzero(d.index.hour * 60 + d.index.minute <= SWING_EXIT[0] * 60 + SWING_EXIT[1])[-1]) if len(d) else 0
+    for k, s in enumerate(sigs):
+        end = sigs[k + 1]["i"] if k + 1 < len(sigs) else exit_i
+        res, how = None, ("next swing " + f"{sigs[k + 1]['time']:%H:%M}") if k + 1 < len(sigs) else f"{SWING_EXIT[0]}:{SWING_EXIT[1]:02d}"
+        for j in range(s["i"] + 1, end + 1):
+            if (s["d"] > 0 and d["Low"].iloc[j] <= s["stop"]) or (s["d"] < 0 and d["High"].iloc[j] >= s["stop"]):
+                res, how = s["d"] * (s["stop"] - s["entry"]), f"stopped {d.index[j]:%H:%M}"
+                break
+        if res is None:
+            res = s["d"] * (d["Close"].iloc[end] - s["entry"])
+        total += res
+        lines.append(f"{s['time']:%H:%M} {'CALL' if s['d'] > 0 else 'PUT'} SWING @{s['entry']:,.1f} | stop {s['stop']:,.0f} | "
+                     f"result {res:+.0f} ({how})")
+    return lines, total, len(sigs)
 
 
 _EXP = {"day": None, "failed": None}
@@ -1357,6 +1473,90 @@ def opening_read_message(df, prev_close=None) -> str:
     return "\n".join(lines)
 
 
+_PREV = {"high": None, "low": None, "close": None}
+
+
+def fetch_prev_levels():
+    """v9.13: yesterday's high / low / close from the daily candles. Never raises; fills _PREV (None where unknown)."""
+    try:
+        token = os.environ.get("UPSTOX_ACCESS_TOKEN")
+        today = datetime.now(IST).date()
+        url = (f"https://api.upstox.com/v3/historical-candle/{quote(INDEX_KEY, safe='')}/days/1/"
+               f"{(today - timedelta(days=1)).isoformat()}/{(today - timedelta(days=10)).isoformat()}")
+        r = requests.get(url, headers={"Accept": "application/json", "Authorization": f"Bearer {token}"}, timeout=10)
+        r.raise_for_status()
+        candles = r.json()["data"]["candles"]   # [ts, o, h, l, c, ...]
+        if candles:
+            c = max(candles, key=lambda x: x[0])
+            _PREV.update(high=float(c[2]), low=float(c[3]), close=float(c[4]))
+    except Exception as e:
+        print(f"Previous day levels not available ({e}); support / resistance will use today's levels only.")
+
+
+def sr_levels(df, price):
+    """v9.13: list of (value, label) support / resistance candidates."""
+    lv = []
+    for k, lab in (("high", "prev day high"), ("low", "prev day low"), ("close", "prev day close")):
+        if _PREV.get(k):
+            lv.append((float(_PREV[k]), lab))
+    if len(df) > 1:
+        prior = df.iloc[:-1]                      # before the signal candle, so a fresh high is not its own resistance
+        lv += [(float(prior["High"].max()), "day high"), (float(prior["Low"].min()), "day low")]
+    if len(df) > OPENING_RANGE_MIN:
+        o = df.iloc[:OPENING_RANGE_MIN]
+        lv += [(float(o["High"].max()), "opening high"), (float(o["Low"].min()), "opening low")]
+    if SR_ROUND_STEP:
+        base = round(price / SR_ROUND_STEP) * SR_ROUND_STEP
+        lv += [(float(base + k * SR_ROUND_STEP), "round") for k in range(-2, 3)]
+    if SR_USE_OI_WALLS and OPTION_DATA:
+        try:
+            o = option_snapshot(price)
+            if o:
+                if o.get("call_wall"):
+                    lv.append((float(o["call_wall"]), "call OI wall"))
+                if o.get("put_wall"):
+                    lv.append((float(o["put_wall"]), "put OI wall"))
+        except Exception:
+            pass
+    return lv
+
+
+def sr_nearest(df, price):
+    """v9.13: ((support, label, dist), (resistance, label, dist)); either side None when there is no level."""
+    lv = sr_levels(df, price)
+
+    def pick(cands, sign):
+        if not cands:
+            return None
+        cands.sort(key=lambda x: sign * (x[0] - price))
+        v0 = cands[0][0]
+        labs = [lab for v, lab in cands if abs(v - v0) <= SR_MERGE_PTS]
+        seen = list(dict.fromkeys(labs))
+        return v0, " + ".join(seen[:3]), abs(v0 - price)
+    below = [x for x in lv if x[0] < price]
+    above = [x for x in lv if x[0] > price]
+    return pick(below, -1), pick(above, 1)
+
+
+def sr_note(df, price, signal) -> str:
+    """v9.13: one information line with the nearest support and resistance, plus a warning when the opposing one is close."""
+    if not SR_ENABLED:
+        return ""
+    try:
+        sup, res = sr_nearest(df, price)
+        parts = [f"support {sup[0]:,.0f} ({sup[1]}, {sup[2]:.0f} pts below)" if sup else "support none",
+                 f"resistance {res[0]:,.0f} ({res[1]}, {res[2]:.0f} pts above)" if res else "resistance none"]
+        line = "Levels: " + " | ".join(parts)
+        if signal == CALL and res and res[2] <= SR_NEAR_PTS:
+            line += f" <- resistance only {res[2]:.0f} pts above this CALL (little room)"
+        elif signal == PUT and sup and sup[2] <= SR_NEAR_PTS:
+            line += f" <- support only {sup[2]:.0f} pts below this PUT (little room)"
+        return line + "\n"
+    except Exception as e:
+        print(f"  support / resistance failed: {e}")
+        return ""
+
+
 def fetch_prev_close():
     """Yesterday's Nifty close from the daily candles (None if it cannot be fetched)."""
     token = os.environ.get("UPSTOX_ACCESS_TOKEN")
@@ -1384,6 +1584,9 @@ def scan_candle(df, fut):
     ob = detect_opening_break(df)
     if ob:
         out.append({"kind": "OPENING BREAK", **ob})
+    sw = detect_swing(df)
+    if sw:
+        out.append({"kind": "SWING", **sw})
     vp = detect_volume_price(df, ind)
     if vp:
         out.append({"kind": "VOLUME PRICE", **vp})
@@ -1406,6 +1609,7 @@ class State:
         self.prev_close = None
         self.opening_read_done = False
         self.ob = None          # {"d", "entry", "stop", "time"} while an opening break idea is open
+        self.swing = None       # same shape, while a swing idea is open (v8)
         self.last_dir, self.last_dir_t = None, None   # v8.3: direction and candle time of the last live alert
         self.combo_last, self.combo_sent_t = None, None   # v8.7
         self.last_vol_alert = None   # v8.6: candle time of the last volume alert
@@ -1414,7 +1618,7 @@ class State:
         if key == self.last_key.get(kind):
             return False
         lt = self.last_time.get(kind)
-        cool = IND_COOLDOWN_MIN if kind == "INDICATION" else COOLDOWN_MIN
+        cool = IND_COOLDOWN_MIN if kind == "INDICATION" else 0 if kind == "SWING" else COOLDOWN_MIN   # swing has its own cooldown
         if lt is not None and (now - lt).total_seconds() < cool * 60:
             return False
         self.last_key[kind], self.last_time[kind] = key, now
@@ -1445,7 +1649,6 @@ def process_candle(df, fut, now, st: State) -> list:
                         f"from the {side} entry {o['entry']:,.1f} at {o['time']}. Exit idea time reached.\n\n"
                         "Not financial advice.")
             st.ob = None
-    # --- TREND status: context only, sent when the held direction changes
     if SEND_TREND:
         td = trend_direction_held(df, fut)
         if td and td != st.trend_reported:
@@ -1529,6 +1732,12 @@ def process_candle(df, fut, now, st: State) -> list:
         for s in grp:
             if s["kind"] == "OPENING BREAK":
                 st.ob = {"d": s["d"], "entry": s["entry"], "stop": s["stop"], "time": ts}
+            if s["kind"] == "SWING":
+                if st.swing:      # an open swing idea in the other direction: this signal is its exit idea
+                    o = st.swing
+                    s["why"].insert(0, f"This flips the open {'CALL' if o['d'] > 0 else 'PUT'} swing idea from {o['time']} "
+                                       f"(entry {o['entry']:,.1f}, {o['d'] * (price - o['entry']):+.0f} pts now): exit it.")
+                st.swing = {"d": s["d"], "entry": s["entry"], "stop": s["stop"], "time": ts}
         note = ("NOTE: against price vs the day's open (lower odds so far)\n"
                 if ALIGN_MODE == "tag" and any(not is_aligned(df, s["kind"], signal) for s in grp) else "")
         if len(grp) == 1:
@@ -1638,7 +1847,7 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
         against_sum = against_n = with_sum = with_n = 0
         merged, order = {}, []
         for t, kind, sig, i in found:
-            if kind == "OPENING BREAK":
+            if kind in ("OPENING BREAK", "SWING"):
                 continue
             key = (t, sig, i)                       # same candle + same direction = one trade
             if key not in merged:
@@ -1648,6 +1857,11 @@ def eod_summary(df: pd.DataFrame, fut) -> str:
         for t, kind, sig, i in found:
             if kind == "OPENING BREAK":
                 out.append(opening_break_outcome(d, t, sig, i))   # held to the exit time, so not added to the 60m sum
+        sw_lines, sw_total, sw_n = swing_outcomes(d)
+        if sw_lines:
+            out += sw_lines
+            out.append(f"Swing trades (held to the next swing signal or {SWING_EXIT[0]}:{SWING_EXIT[1]:02d}): "
+                       f"{sw_total:+.0f} pts over {sw_n} trades. Separate from the 60m sum below.")
         for key in order[:30]:
             t, sig, i = key
             kinds = merged[key]
@@ -1733,17 +1947,21 @@ def main():
     if relay_run:
         send_telegram("Scanner continuing in a fresh GitHub run (handover done). Alerts carry on as normal.")
     else:
-        send_telegram(f"Nifty scanner v9.10 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
+        send_telegram(f"Nifty scanner v9.13 started{' (accuracy mode: fewer, stricter alerts)' if ACCURACY_MODE else ''}. Live alerts: {', '.join(LIVE_KINDS)}"
                       f"{' + WAIT notes' if SEND_WAIT_NOTES else ''}. "
                       + (f"Summary only: {', '.join(summary_only)}. " if summary_only else "")
                       + f"No BREAKOUT after {BREAKOUT_LAST[0]}:{BREAKOUT_LAST[1]:02d}, nothing new after "
                         f"{NO_NEW_AFTER[0]}:{NO_NEW_AFTER[1]:02d}. "
                       + (f"Against-the-open signals are {'tagged' if ALIGN_MODE == 'tag' else 'blocked'}. " if ALIGN_MODE != "off" else "")
+                      + (f"Support / resistance line is on (warns within {SR_NEAR_PTS} pts). " if SR_ENABLED else "")
+                      + f"No SWING after {SWING_LAST[0]}:{SWING_LAST[1]:02d}; paper trades only for {', '.join(PAPER_ONLY_KINDS) or 'all alerts'}, later alerts are alert-only. "
+                      + f"SWING alert: a {SWING_PTS}-pt reversal off a day top or bottom (late by design). "
                       + f"VOLUME PRICE alert: 3-candle move with volume up/down, futures-VWAP and 30-min momentum confirmed, any time of day. "
                       + f"Volume source: {fut_name or 'none (volume unverified)'}.")
 
     last_candle, obs_count, st = None, 0, State()
     st.opening_read_done = relay_run          # a hand-over run must not repeat the 09:30 read
+    fetch_prev_levels()                                # v9.13: yesterday's high / low / close for the support / resistance line
     try:
         st.prev_close = fetch_prev_close()
     except Exception as e:
@@ -1807,4 +2025,60 @@ def main():
                     send_telegram("Market closed. Scanner stopped for the day.")
                 print("Market closed. Stopping.")
                 break
-            if MAX_RUN_MIN and (time.time() - started) / 60
+            if MAX_RUN_MIN and (time.time() - started) / 60 >= MAX_RUN_MIN and market_open():
+                with open("relay_needed", "w") as fh:        # the workflow starts the next run when it sees this file
+                    fh.write(st.trend_reported or "")
+                send_telegram("Handing over to a fresh GitHub run now (GitHub stops a job after 6 hours). "
+                              "Alerts continue in about a minute.")
+                print("Relay hand-over requested. Stopping this run.")
+                break
+            if not market_open():
+                print("Waiting for market open (9:15 IST, Mon-Fri)...")
+            else:
+                df = fetch_candles(INDEX_KEY)
+                if not len(df) and (now.hour, now.minute) >= (9, 35):
+                    # 20 minutes after the open and still no candles: a market holiday or no data
+                    send_telegram("No Nifty candles today, so the market looks closed (holiday?). "
+                                  "Scanner stopping for the day.")
+                    print("No candles after 09:35 on a weekday. Stopping (holiday?).")
+                    break
+                fut = None
+                if fut_key:
+                    try:
+                        fut = fetch_candles(fut_key)
+                    except requests.RequestException as e:
+                        print(f"  Futures fetch failed: {e}")
+                df, fut = wait_for_newest_candle(df, fut, fut_key)
+                now = datetime.now(IST)               # v9.4: after the wait, so the log shows the true creation time
+                df, fut = sync_futures(df, fut, fut_key, retries=0)   # the wait above replaced its retries; this only trims
+                if len(df) and df.index[-1] != last_candle:  # evaluate each candle once
+                    last_candle = df.index[-1]
+                    obs = observation(df, fut)
+                    print(obs.replace("\n", " | "))
+                    obs_count += 1
+                    if OBSERVE_TELEGRAM_EVERY and obs_count % OBSERVE_TELEGRAM_EVERY == 0:
+                        send_telegram(obs, silent=True)
+                    if (OPTION_DATA or OPTION_CSV) and len(df):
+                        option_snapshot(float(df["Close"].iloc[-1]))   # keeps the option CSV filled every 5 minutes
+                    if len(df) >= IND_MIN_CANDLES:
+                        for m in process_candle(df, fut, now, st):
+                            print(m.replace("\n", " | "))
+                            send_telegram(m)
+                        if paper_trader and PAPER_TRADING:      # v9.5: open the queued paper trades AFTER the alerts went out
+                            try:
+                                for pm in paper_trader.open_pending(paper_chain, datetime.now(IST)):
+                                    print(pm.replace("\n", " | "))
+                                    send_telegram(pm, silent=True)
+                            except Exception as e:
+                                print(f"  paper trade failed: {e}")
+                    if len(df) >= FULL_CANDLES:
+                        _, _, why, _ = analyze(df, fut)
+                        for w in why:
+                            print(f"    {w}")
+        except requests.RequestException as e:
+            print(f"Network/API error: {e}")
+        time.sleep(max(5, 68 - datetime.now(IST).second))  # wake at ~:08 of the next minute
+
+
+if __name__ == "__main__":
+    main()
